@@ -60,3 +60,10 @@ dist/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Secret files - NEVER upload
+.env
+.env.local
+.env.production
+*.env
+ai_service/services/.env
