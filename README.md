@@ -214,7 +214,7 @@ GROQ_API_KEY=your_groq_api_key_here
 
 | Applicant Dashboard | HR Dashboard | Resume Enhancer |
 |---|---|---|
-| ![](screenshots/applicant.png) | ![](screenshots/hr.png) | ![](screenshots/enhancer.png) |
+| ![](P2-img3.png) | ![](P2-Himg2.png) | ![](P2-img7.png) |
 
 ---
 
