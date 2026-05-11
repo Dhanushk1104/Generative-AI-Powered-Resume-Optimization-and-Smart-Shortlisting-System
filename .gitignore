@@ -24,3 +24,39 @@ ai_service/*.pyc
 # General
 .DS_Store
 *.log
+
+
+# Virtual Environment - Never upload this
+ai_service/.venv/
+.venv/
+venv/
+env/
+
+# AI Model files - Too large for GitHub
+ai_service/services/models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# Java
+target/
+*.class
+*.jar
+.idea/
+
+# React
+node_modules/
+build/
+dist/
+.env.local
+
+# OS junk
+.DS_Store
+Thumbs.db
