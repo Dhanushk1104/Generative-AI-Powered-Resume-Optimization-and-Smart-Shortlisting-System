@@ -1,0 +1,4210 @@
+ai_service/
+├─ services/
+│ ├─ init.py
+│ ├─ advanced_resume_ai.py
+│ ├─ hr_shortlisting.py
+│ ├─ jd_tailor.py
+│ ├─ llm_client.py
+│ ├─ project_enhancer.py
+│ ├─ resume_rewriter.py
+│ └─ text_extractor.py
+├─ config.py
+├─ main.py
+├─ requirements.txt
+└─ test_api.py
+
+
+init.py:
+advanced_resume_ai.py:
+"""
+advanced_resume_ai.py
+─────────────────────
+Phase 1 — Pure rule-based ATS analysis engine. No LLM required.
+
+BUG FIXES in this version:
+  BUG-FIX-1 : advanced_parse_resume() now returns BOTH a nested structure
+               AND flat top-level keys (ats_score, recommended_role,
+               matched_keywords) so Java Spring controllers that read the
+               top-level JSON directly will always find the values.
+
+  BUG-FIX-2 : extract_skills() — multi-word skill matching fixed.
+               Phrases like "machine learning", "spring boot", "rest api"
+               now use a simple substring search on the lowercased text
+               instead of a word-boundary regex that broke on spaces.
+
+  BUG-FIX-3 : calculate_ats_score() — COMPLETELY REDESIGNED.
+               Old algorithm max was 105 (capped to 100) so every complete
+               resume scored 100. New graduated 7-dimension algorithm
+               spreads scores realistically:
+                 Minimal fresher   → 13–25
+                 Average fresher   → 45–60
+                 Good fresher      → 60–75
+                 Experienced dev   → 80–97
+               Dimensions: Skills(25) | Projects(20) | Experience(20) |
+               Education(15) | Certs(10) | Contact(5) | Format(5).
+
+  BUG-FIX-4 : predict_role() — returns "Software Engineer" as a reliable
+               fallback so Suggested Role is never blank on the frontend.
+
+  BUG-FIX-5 : extract_education() CGPA regex improved — "cgpa: 8.9",
+               "8.5/10", "8.5 / 10", "85.5%", "gpa: 3.8" all captured.
+
+  BUG-FIX-6 : extract_education() college name now captures the FULL LINE
+               containing the institution keyword (not just from the keyword
+               onwards). "Vels Institute of Science, Technology & Advanced
+               Studies" is no longer truncated to "Institute of Science...".
+
+  BUG-FIX-7 : extract_education() — label prefixes like "Education:",
+               "From:", "Institution:" are stripped from the college name.
+
+  BUG-FIX-8 : generate_feedback() expanded with per-section breakdown and
+               targeted improvement advice.
+
+  SKILL-EXPAND-1 : SKILL_DB expanded from ~55 to 140+ industry-standard
+               skills covering AI/ML, cloud-native, DevOps, modern web,
+               mobile, data engineering, security, and testing.
+
+  SCORE-DETAIL-1 : calculate_ats_score_detailed() exposes per-dimension
+               breakdown so the React frontend can power the strength meter.
+
+Original fixes (DATA-FIX-1 through DATA-FIX-4, CLEAN-1) are all preserved.
+"""
+
+import re
+from typing import Dict, List, Any, Tuple
+from datetime import datetime
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL DATABASE  (SKILL-EXPAND-1: extended from ~55 to 140+ skills)
+# ══════════════════════════════════════════════════════════════════════════════
+
+SKILL_DB = {
+    # ── Programming Languages ─────────────────────────────────────────────
+    "python", "java", "c", "c++", "c#", "javascript", "typescript",
+    "sql", "html", "css", "kotlin", "swift", "go", "golang", "rust",
+    "scala", "r", "php", "ruby", "perl", "bash", "shell", "powershell",
+    "dart", "matlab", "groovy", "lua", "elixir", "haskell",
+
+    # ── Frontend Frameworks / Libraries ──────────────────────────────────
+    "react", "angular", "vue", "next.js", "nuxt.js", "gatsby", "svelte",
+    "bootstrap", "tailwind css", "tailwind", "material ui", "ant design",
+    "redux", "zustand", "react query", "graphql", "apollo",
+    "webpack", "vite", "babel",
+
+    # ── Backend Frameworks ────────────────────────────────────────────────
+    "node.js", "express", "express.js", "django", "flask", "fastapi",
+    "spring", "spring boot", "spring mvc", "spring security", "spring cloud",
+    "hibernate", "jpa", "maven", "gradle",
+    "rails", "ruby on rails", "laravel", "symfony",
+    "asp.net", ".net core", "dotnet",
+    "quarkus", "micronaut", "ktor",
+
+    # ── Mobile ────────────────────────────────────────────────────────────
+    "android", "ios", "react native", "flutter", "xamarin",
+    "jetpack compose", "swiftui",
+
+    # ── AI / ML / Data Science ────────────────────────────────────────────
+    "machine learning", "deep learning", "nlp", "natural language processing",
+    "computer vision", "tensorflow", "pytorch", "scikit-learn", "sklearn",
+    "opencv", "yolov5", "yolo", "keras", "huggingface", "transformers",
+    "llm", "large language model", "generative ai", "gen ai",
+    "bert", "gpt", "langchain", "vector database", "rag",
+    "reinforcement learning", "neural network", "cnn", "rnn", "lstm",
+    "xgboost", "lightgbm", "random forest",
+    "mlops", "model deployment", "feature engineering",
+    "a/b testing", "statistical analysis", "data science",
+
+    # ── Databases ─────────────────────────────────────────────────────────
+    "mysql", "postgresql", "mongodb", "firebase", "oracle", "sqlite",
+    "redis", "cassandra", "elasticsearch", "dynamodb", "couchdb",
+    "neo4j", "influxdb", "snowflake", "bigquery", "aurora",
+    "ms sql server", "sql server", "mariadb",
+
+    # ── Cloud Platforms ───────────────────────────────────────────────────
+    "aws", "azure", "gcp", "google cloud", "heroku", "digitalocean",
+    "vercel", "netlify", "cloudflare",
+    "ec2", "s3", "lambda", "rds", "sqs", "sns", "ecs", "eks",
+    "azure devops", "azure functions",
+
+    # ── DevOps / Infrastructure ────────────────────────────────────────────
+    "docker", "kubernetes", "terraform", "ansible", "puppet", "chef",
+    "jenkins", "ci/cd", "github actions", "gitlab ci", "circleci",
+    "linux", "ubuntu", "centos", "nginx", "apache", "tomcat",
+    "helm", "istio", "prometheus", "grafana", "elk stack",
+    "vagrant", "packer", "pulumi",
+
+    # ── Message Queues / Streaming ────────────────────────────────────────
+    "kafka", "rabbitmq", "activemq",
+    "apache kafka", "apache spark", "apache flink",
+
+    # ── Version Control / Collaboration ───────────────────────────────────
+    "git", "github", "gitlab", "bitbucket", "svn",
+    "jira", "confluence", "trello", "notion",
+
+    # ── Testing ───────────────────────────────────────────────────────────
+    "junit", "testng", "mockito", "jest", "mocha", "chai",
+    "selenium", "cypress", "playwright", "pytest", "unittest",
+    "postman", "rest assured",
+    "tdd", "bdd", "cucumber", "test automation",
+
+    # ── Security ─────────────────────────────────────────────────────────
+    "oauth", "oauth2", "jwt", "ssl", "tls",
+    "oauth2 / jwt", "cybersecurity", "owasp",
+
+    # ── Data / Analytics ──────────────────────────────────────────────────
+    "numpy", "pandas", "matplotlib", "seaborn", "plotly",
+    "tableau", "power bi", "excel", "looker",
+    "spark", "hadoop", "hive", "airflow", "dbt",
+    "etl", "data pipeline", "data warehouse",
+
+    # ── Web / API ──────────────────────────────────────────────────────────
+    "rest api", "restful api", "microservices", "api", "websocket",
+    "grpc", "soap", "openapi", "swagger",
+    "api gateway", "load balancer",
+
+    # ── Design Tools ──────────────────────────────────────────────────────
+    "figma", "adobe xd", "sketch",
+
+    # ── Development Practices ─────────────────────────────────────────────
+    "agile", "scrum", "kanban", "devops", "system design",
+    "object oriented programming", "oop", "design patterns", "solid principles",
+    "microservices architecture", "event driven", "serverless",
+
+    # ── IDE / Dev Tools ───────────────────────────────────────────────────
+    "vs code", "intellij", "eclipse", "pycharm", "android studio",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROLE DATABASE
+# ══════════════════════════════════════════════════════════════════════════════
+
+ROLE_KEYWORDS: Dict[str, List[str]] = {
+    "Java Developer":       ["java", "spring", "hibernate", "maven", "jpa", "spring boot"],
+    "Python Developer":     ["python", "django", "flask", "fastapi", "pandas", "numpy"],
+    "Full Stack Developer": ["react", "node.js", "javascript", "typescript", "frontend", "backend", "api"],
+    "Data Scientist":       ["python", "machine learning", "deep learning", "pandas", "numpy",
+                             "tensorflow", "pytorch", "nlp", "jupyter"],
+    "DevOps Engineer":      ["docker", "kubernetes", "aws", "ci/cd", "jenkins", "terraform", "ansible"],
+    "Frontend Developer":   ["react", "angular", "vue", "javascript", "html", "css", "ui", "ux"],
+    "Backend Developer":    ["rest api", "microservices", "server", "java", "python", "node.js"],
+    "Cloud Engineer":       ["aws", "azure", "gcp", "cloud", "terraform", "docker", "kubernetes"],
+    "ML Engineer":          ["machine learning", "tensorflow", "pytorch", "mlops", "model", "training"],
+    "Data Analyst":         ["sql", "tableau", "power bi", "excel", "pandas", "data analysis"],
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROFILE EXTRACTION  (DATA-FIX-1: name extracted — preserved from original)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_profile(text: str) -> Dict:
+    """
+    Extract name, email, phone, LinkedIn, and GitHub from resume text.
+    LinkedIn and GitHub added to support contact completeness scoring.
+    """
+
+    # Email
+    email_match = re.search(
+        r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text
+    )
+    email = email_match.group() if email_match else None
+
+    # Phone — supports +country code and common separators
+    phone_match = re.search(
+        r"(\+?\d{1,3}[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}", text
+    )
+    phone = phone_match.group().strip() if phone_match else None
+
+    # LinkedIn URL
+    linkedin_match = re.search(
+        r"linkedin\.com/in/[a-zA-Z0-9\-_%]+", text, re.IGNORECASE
+    )
+    linkedin = linkedin_match.group() if linkedin_match else None
+
+    # GitHub URL
+    github_match = re.search(
+        r"github\.com/[a-zA-Z0-9\-_%]+", text, re.IGNORECASE
+    )
+    github = github_match.group() if github_match else None
+
+    # ── Name heuristic (DATA-FIX-1) ─────────────────────────────────────────
+    name = None
+    name_pattern = re.compile(r"^[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){1,3}$")
+
+    for line in text.split("\n")[:15]:
+        line = line.strip()
+        if not line:
+            continue
+        if "@" in line or "http" in line or re.search(r"\d{5,}", line):
+            continue
+        if re.search(
+            r"(resume|curriculum|vitae|cv|profile|objective|summary|education|skills)",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+        if name_pattern.match(line) and len(line) >= 4:
+            name = line
+            break
+
+    return {
+        "name":     name,
+        "email":    email,
+        "phone":    phone,
+        "linkedin": linkedin,
+        "github":   github,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILLS EXTRACTION  (BUG-FIX-2: multi-word skills fixed + SKILL-EXPAND-1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_skills(text: str) -> List[str]:
+    """
+    Match skills from SKILL_DB against resume text (case-insensitive).
+
+    BUG-FIX-2: Multi-word skills (e.g. "spring boot", "machine learning",
+    "rest api") are matched via simple substring search. Single-word skills
+    use word-boundary regex to avoid partial matches like "c" inside "bachelor".
+
+    SKILL-EXPAND-1: SKILL_DB now has 140+ skills for better industry coverage.
+    """
+    text_low = text.lower()
+    found: set = set()
+
+    for skill in SKILL_DB:
+        if " " in skill:
+            # Multi-word: simple substring match — correct and fast
+            if skill in text_low:
+                found.add(skill.title())
+        else:
+            # Single-word: word boundary to avoid false positives
+            pattern = r"\b" + re.escape(skill) + r"\b"
+            if re.search(pattern, text_low):
+                found.add(skill.title())
+
+    return sorted(found)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EDUCATION EXTRACTION  (BUG-FIX-5 + BUG-FIX-6 + BUG-FIX-7)
+# ══════════════════════════════════════════════════════════════════════════════
+
+LOCATIONS = [
+    # ── Indian cities ─────────────────────────────────────────────────────
+    "chennai", "bangalore", "bengaluru", "hyderabad", "delhi", "mumbai",
+    "pune", "coimbatore", "madurai", "salem", "erode", "tiruppur",
+    "trichy", "tiruchirappalli", "vellore", "kochi", "kolkata", "ahmedabad",
+    "surat", "jaipur", "lucknow", "nagpur", "indore", "bhopal", "patna",
+    "noida", "gurgaon", "gurugram", "chandigarh", "vadodara",
+    "nellore", "vijayawada", "visakhapatnam", "vizag", "mangalore",
+    "mysuru", "mysore", "hubli", "belgaum",
+    "kattankulathur", "perungalathur", "tambaram",
+    # ── Indian states ─────────────────────────────────────────────────────
+    "tamil nadu", "karnataka", "kerala", "andhra pradesh", "telangana",
+    "maharashtra", "gujarat", "rajasthan", "uttar pradesh", "west bengal",
+    "madhya pradesh", "bihar", "punjab", "haryana", "odisha",
+    # ── Countries ─────────────────────────────────────────────────────────
+    "india", "usa", "uk", "canada", "australia", "germany", "singapore",
+    "united states", "united kingdom",
+]
+
+_LOCATION_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(loc) for loc in LOCATIONS) + r")\b",
+    re.IGNORECASE,
+)
+
+# Keywords that mark a line as an institution name
+_INSTITUTION_KEYWORD_RE = re.compile(
+    r"(college|institute|university|polytechnic|school of)",
+    re.IGNORECASE,
+)
+
+# Label prefixes to strip from extracted college name (BUG-FIX-7)
+_LABEL_PREFIX_RE = re.compile(
+    r"^(education|qualification|from|at|institution|college|school|university)\s*[:\-]\s*",
+    re.IGNORECASE,
+)
+
+
+def extract_education(text: str) -> Dict:
+    """
+    Extract degree, CGPA, college name, and location from resume text.
+
+    BUG-FIX-5  : Broader CGPA patterns capture more formats.
+    BUG-FIX-6  : College name extracted from the FULL LINE containing the
+                 institution keyword — no longer anchored at the keyword
+                 position. Fixes truncation of names like:
+                   "Vels Institute of Science, Technology & Advanced Studies"
+                 which previously returned "Institute of Science, ..."
+    BUG-FIX-7  : Label prefixes ("Education:", "From:") stripped from name.
+    """
+    text_low = text.lower()
+
+    # ── Degree ───────────────────────────────────────────────────────────────
+    degree = None
+    degree_patterns = [
+        r"b\.?tech\b",
+        r"m\.?tech\b",
+        r"b\.?e\.?\b",
+        r"b\.?sc\b",
+        r"m\.?sc\b",
+        r"b\.?ca\b",
+        r"m\.?ca\b",
+        r"b\.?com\b",
+        r"m\.?com\b",
+        r"m\.?b\.?a\b",
+        r"ph\.?d\b",
+        r"bachelor\s+of\s+\w+",
+        r"master\s+of\s+\w+",
+        r"bachelor",
+        r"master",
+        r"diploma",
+    ]
+    for pat in degree_patterns:
+        m = re.search(pat, text_low)
+        if m:
+            degree = m.group().strip().upper()
+            break
+
+    # ── CGPA / GPA (BUG-FIX-5) ───────────────────────────────────────────────
+    # More specific patterns listed first to avoid partial matches
+    cgpa = None
+    cgpa_patterns = [
+        r"cgpa\s*[:\-]?\s*(\d+\.?\d*)\s*/\s*10",    # cgpa: 8.5/10
+        r"cgpa\s*[:\-]?\s*(\d+\.?\d*)",              # cgpa: 8.5
+        r"gpa\s*[:\-]?\s*(\d+\.?\d*)\s*/\s*4\.?0?",  # gpa: 3.8/4.0
+        r"gpa\s*[:\-]?\s*(\d+\.?\d*)",               # gpa: 3.8
+        r"(\d+\.?\d*)\s*/\s*10",                     # 8.5/10  or  8.5 / 10
+        r"(\d{2}\.\d+)\s*%",                          # 85.50%
+        r"percentage\s*[:\-]?\s*(\d+\.?\d*)",        # percentage: 85
+    ]
+    for pat in cgpa_patterns:
+        m = re.search(pat, text_low)
+        if m:
+            cgpa = m.group().strip()
+            break
+
+    # ── College / University Name (BUG-FIX-6 + BUG-FIX-7) ───────────────────
+    #
+    # The OLD approach used:
+    #   re.search(r"(college|institute|university|polytechnic)[^\n]{2,120}", text)
+    # which ANCHORED at the keyword, returning "Institute of Science, ..."
+    # instead of "Vels Institute of Science, ...".
+    #
+    # The NEW approach iterates every line and returns the FULL LINE that
+    # contains an institution keyword. This correctly captures names where
+    # the keyword appears mid-sentence (e.g. "Vels Institute...").
+    college = None
+
+    for line in text.split("\n"):
+        line_stripped = line.strip()
+
+        # Skip empty or very short lines
+        if len(line_stripped) < 5:
+            continue
+
+        # Skip lines that are clearly not institution names
+        if re.search(
+            r"(internship|work experience|experience|project|skills|"
+            r"certification|email|phone|linkedin|github|objective|summary)",
+            line_stripped,
+            re.IGNORECASE,
+        ):
+            continue
+
+        if _INSTITUTION_KEYWORD_RE.search(line_stripped):
+            # BUG-FIX-7: strip label prefixes like "Education:", "From:"
+            cleaned = _LABEL_PREFIX_RE.sub("", line_stripped).strip()
+
+            # Remove pipe-separated location suffix e.g. "Name | Chennai"
+            cleaned = re.sub(r"\s*[|]\s*.+$", "", cleaned).strip()
+
+            # Remove trailing year range e.g. "Name - 2020-2024"
+            cleaned = re.sub(r"\s*[\-–]\s*\d{4}.*$", "", cleaned).strip()
+
+            # Truncate if unreasonably long (more than 150 chars is likely a paragraph)
+            if len(cleaned) > 150:
+                cleaned = cleaned[:150].strip()
+
+            # Remove trailing punctuation but preserve internal commas
+            cleaned = cleaned.rstrip(".,;:")
+
+            if len(cleaned) >= 5:
+                college = cleaned
+                break
+
+    # ── Location ─────────────────────────────────────────────────────────────
+    location = None
+    m = _LOCATION_PATTERN.search(text)
+    if m:
+        location = m.group().title()
+
+    if not any([degree, cgpa, college, location]):
+        return {}
+
+    return {
+        "degree":   degree,
+        "cgpa":     cgpa,
+        "college":  college,
+        "location": location,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# META
+# ══════════════════════════════════════════════════════════════════════════════
+
+def extract_meta() -> Dict:
+    """Return timestamp metadata for the analysis run."""
+    now = datetime.now()
+    return {
+        "date":     now.strftime("%Y-%m-%d"),
+        "time":     now.strftime("%H:%M:%S"),
+        "location": "User System",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ROLE PREDICTION  (BUG-FIX-4: never returns empty string)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def predict_role(text: str, skills: List[str]) -> str:
+    """
+    Score each role by keyword frequency and return the best match.
+
+    BUG-FIX-4: Always returns a non-empty string. Falls back through
+    skills-based heuristics before defaulting to "Software Engineer".
+    Uses extracted skills list as a secondary signal for better accuracy.
+    """
+    text_low   = text.lower()
+    skills_low = [s.lower() for s in skills]
+    scores: Dict[str, int] = {}
+
+    for role, keywords in ROLE_KEYWORDS.items():
+        text_hits  = sum(1 for kw in keywords if kw in text_low)
+        skill_hits = sum(1 for kw in keywords if kw in skills_low)
+        scores[role] = text_hits + skill_hits
+
+    if not scores or max(scores.values()) == 0:
+        if any(s in skills_low for s in ["python", "django", "flask", "fastapi"]):
+            return "Python Developer"
+        if any(s in skills_low for s in ["java", "spring", "spring boot"]):
+            return "Java Developer"
+        if any(s in skills_low for s in ["react", "angular", "vue", "javascript"]):
+            return "Frontend Developer"
+        if any(s in skills_low for s in ["docker", "kubernetes", "aws", "terraform"]):
+            return "DevOps Engineer"
+        if any(s in skills_low for s in ["machine learning", "deep learning", "tensorflow"]):
+            return "ML Engineer"
+        return "Software Engineer"
+
+    return max(scores, key=scores.get)  # type: ignore[arg-type]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ATS SCORE ENGINE — REDESIGNED  (BUG-FIX-3 + SCORE-DETAIL-1)
+#
+# ROOT CAUSE OF OLD BUG:
+#   Old max = skills(40) + projects(20) + edu(15) + exp(15) + certs(10) + contact(5) = 105
+#   Capped to 100. Any resume with 10+ skills AND all sections present scored 100.
+#   This was not discriminating — a mediocre resume with 10 generic skills scored 100.
+#
+# NEW ALGORITHM — 7 weighted dimensions:
+#
+#   1. SKILLS (max 25)
+#      Graduated: ≥15 skills=25, ≥12=22, ≥8=18, ≥5=13, ≥3=9, ≥1=5, 0=0
+#      Rationale: skill BREADTH matters but tops out — prevents skill-stuffing
+#
+#   2. PROJECTS (max 20)
+#      Rewards: action verb count + quantified achievements (% / K+ / metrics)
+#      Rationale: industry ATS favours IMPACT statements, not just presence
+#
+#   3. EXPERIENCE (max 20)
+#      Rewards: job titles + year ranges + years of experience
+#      Rationale: freshers cap at 10 (internship), seniors can reach 20
+#
+#   4. EDUCATION (max 15)
+#      Sub-scores: degree(7) + CGPA(5) + institution(3) = 15
+#      Rationale: completeness matters, not just presence of the word "education"
+#
+#   5. CERTIFICATIONS (max 10)
+#      Differentiates: top certs (AWS/GCP/etc) vs generic (Udemy/NPTEL)
+#      Rationale: recognised certifications signal serious upskilling
+#
+#   6. CONTACT COMPLETENESS (max 5)
+#      Rewards: email + phone + LinkedIn + GitHub + portfolio
+#      Rationale: missing contact = ATS disqualification in many systems
+#
+#   7. RESUME STRUCTURE (max 5)
+#      Rewards: summary section + 4+ labelled sections + word count
+#      Rationale: structured resumes parse better in real ATS tools
+#
+#   Total max: 25+20+20+15+10+5+5 = 100 (no cap needed)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Industry-standard action verbs that ATS systems recognise
+_ACTION_VERBS = [
+    "developed", "implemented", "designed", "optimized", "optimised", "built",
+    "architected", "engineered", "created", "deployed", "integrated", "automated",
+    "reduced", "increased", "improved", "achieved", "launched", "led", "managed",
+    "delivered", "maintained", "refactored", "migrated", "resolved", "collaborated",
+    "mentored", "streamlined", "accelerated", "established", "transformed", "enhanced",
+    "configured", "orchestrated", "monitored", "tested", "documented", "published",
+    "scaled", "secured", "analysed", "analyzed", "coordinated", "spearheaded",
+    "prototyped", "shipped", "contributed", "researched", "trained", "presented",
+    "reviewed", "optimized", "structured", "modelled", "modeled", "benchmarked",
+]
+
+# Patterns that indicate quantified achievements — key ATS differentiator
+_QUANT_PATTERNS = [
+    r"\d+\s*%",                  # 40%,  35 %
+    r"\d+[kK]\+?",               # 10K+,  5k  users
+    r"\d+\s*(users|requests|records|ms|seconds|hours|days|engineers|members|clients|transactions)",
+    r"\$\s*\d+",                 # $5M,  $500
+    r"\d+x\s",                   # 3x faster
+    r"\d+\s*\+\s*(projects|years|clients|products|services)",
+    r"\d{1,3},\d{3}",            # 1,000  /  10,000  — large numbers
+]
+
+
+def calculate_ats_score_detailed(text: str, skills: List[str]) -> Dict[str, Any]:
+    """
+    Calculate ATS score with a full per-dimension breakdown.
+
+    Returns:
+      {
+        "total":     int (0–100),
+        "breakdown": { dimension: score, ... },
+        "details":   { dimension: "human-readable note", ... }
+      }
+
+    BUG-FIX-3 : Graduated scoring prevents all complete resumes from
+                scoring 100. Realistic distribution across skill levels.
+    SCORE-DETAIL-1 : Breakdown dict powers the frontend strength meter.
+    """
+    text_low = text.lower()
+    breakdown: Dict[str, int] = {}
+    details:   Dict[str, str] = {}
+
+    # ── 1. SKILLS (max 25) ────────────────────────────────────────────────────
+    n_skills = len(skills)
+    if   n_skills >= 15: skills_pts = 25
+    elif n_skills >= 12: skills_pts = 22
+    elif n_skills >= 8:  skills_pts = 18
+    elif n_skills >= 5:  skills_pts = 13
+    elif n_skills >= 3:  skills_pts = 9
+    elif n_skills >= 1:  skills_pts = 5
+    else:                skills_pts = 0
+    breakdown["skills"] = skills_pts
+    details["skills"] = (
+        f"{n_skills} skills detected. Great coverage — keep it relevant to your target role!"
+        if skills_pts >= 18 else
+        f"{n_skills} skills detected. Add more to reach 8+ (aim for cloud, DevOps, or AI skills)."
+        if skills_pts < 13 else
+        f"{n_skills} skills detected. Good — consider adding cloud/DevOps/AI skills to reach 12+."
+    )
+
+    # ── 2. PROJECTS (max 20) ──────────────────────────────────────────────────
+    has_project_section = bool(re.search(r"\bproject", text_low))
+    verb_hits  = sum(1 for v in _ACTION_VERBS   if v in text_low)
+    quant_hits = sum(1 for p in _QUANT_PATTERNS if re.search(p, text_low))
+
+    if   has_project_section and verb_hits >= 6 and quant_hits >= 3: proj_pts = 20
+    elif has_project_section and verb_hits >= 4 and quant_hits >= 2: proj_pts = 16
+    elif has_project_section and verb_hits >= 3 and quant_hits >= 1: proj_pts = 12
+    elif has_project_section and verb_hits >= 2:                     proj_pts = 8
+    elif has_project_section or  verb_hits >= 1:                     proj_pts = 5
+    else:                                                             proj_pts = 0
+    breakdown["projects"] = proj_pts
+    details["projects"] = (
+        f"{verb_hits} action verbs, {quant_hits} quantified metrics — excellent project section!"
+        if proj_pts >= 16 else
+        f"{verb_hits} action verbs found but 0 quantified metrics. Add numbers (e.g. 'reduced latency by 30%')."
+        if quant_hits == 0 else
+        f"{verb_hits} action verbs, {quant_hits} metrics. Add more impact statements to score higher."
+    )
+
+    # ── 3. EXPERIENCE (max 20) ────────────────────────────────────────────────
+    has_exp_section = any(
+        w in text_low
+        for w in ["experience", "employment", "work history", "work experience"]
+    )
+    has_job_title = any(
+        w in text_low
+        for w in [
+            "software engineer", "developer", "analyst", "architect",
+            "manager", "lead", "consultant", "specialist", "scientist",
+            "researcher", "associate", "officer", "designer",
+        ]
+    )
+    has_internship = any(
+        w in text_low
+        for w in ["intern", "internship", "trainee", "apprentice"]
+    )
+    # Explicit year count mentions (e.g. "3+ years of experience")
+    year_mentions = re.findall(r"(\d+)\+?\s*years?\s*(of\s+)?(experience|exp)", text_low)
+    max_years = 0
+    if year_mentions:
+        try:
+            max_years = max(int(y[0]) for y in year_mentions)
+        except Exception:
+            max_years = 0
+    # Year ranges (e.g. "2020 - 2024") as implicit experience evidence
+    year_ranges = re.findall(r"20\d{2}\s*[\-–]\s*(20\d{2}|present|current)", text_low)
+    has_year_range = len(year_ranges) >= 1
+
+    if   has_exp_section and has_job_title and max_years >= 5: exp_pts = 20
+    elif has_exp_section and has_job_title and max_years >= 3: exp_pts = 18
+    elif has_exp_section and has_job_title and has_year_range: exp_pts = 15
+    elif has_exp_section and has_job_title:                    exp_pts = 13
+    elif has_exp_section and has_internship:                   exp_pts = 10
+    elif has_internship:                                       exp_pts = 7
+    elif has_exp_section:                                      exp_pts = 4
+    else:                                                      exp_pts = 0
+    breakdown["experience"] = exp_pts
+    details["experience"] = (
+        f"Full-time experience detected ({max_years}+ years) — strong profile!"
+        if has_job_title and has_exp_section and max_years >= 3 else
+        "Full-time experience section detected — good."
+        if has_job_title and has_exp_section else
+        "Internship detected — solid for a fresher. Describe impact using action verbs."
+        if has_internship else
+        "No experience section found. Add internships, projects, or part-time work."
+    )
+
+    # ── 4. EDUCATION (max 15) ─────────────────────────────────────────────────
+    has_degree = bool(re.search(
+        r"\b(b\.?tech|btech|b\.?e|bachelor|b\.?sc|m\.?tech|mtech|m\.?sc|"
+        r"master|mca|bca|phd|ph\.?d|diploma|m\.?b\.?a)\b",
+        text_low,
+    ))
+    has_cgpa = bool(re.search(
+        r"(cgpa|gpa|percentage|%)\s*[:\-]?\s*\d", text_low
+    ))
+    has_institution = bool(re.search(
+        r"\b(university|college|institute|polytechnic)\b", text_low, re.IGNORECASE
+    ))
+
+    edu_pts = 0
+    if has_degree:      edu_pts += 7
+    if has_cgpa:        edu_pts += 5
+    if has_institution: edu_pts += 3
+    breakdown["education"] = min(edu_pts, 15)
+    details["education"] = (
+        "Degree, CGPA, and institution all detected — complete education section!"
+        if (has_degree and has_cgpa and has_institution) else
+        "Degree and institution found but CGPA/percentage is missing — add it."
+        if (has_degree and has_institution and not has_cgpa) else
+        "Degree found but institution name is missing — add your college name."
+        if (has_degree and not has_institution) else
+        "Add Education section with degree name, college, and CGPA/percentage."
+    )
+
+    # ── 5. CERTIFICATIONS (max 10) ────────────────────────────────────────────
+    # Industry-recognised (weighted higher)
+    top_cert_keywords = [
+        "aws certified", "google certified", "microsoft certified", "oracle certified",
+        "azure certified", "pmp certified", "cissp", "cka", "ckad",
+        "hashicorp certified", "certified scrum master", "six sigma", "comptia",
+        "salesforce certified", "google cloud professional",
+    ]
+    # Generic / online courses (weighted lower)
+    generic_cert_keywords = [
+        "certification", "certified", "certificate", "nptel", "coursera",
+        "udemy", "edx", "linkedin learning", "hackerrank", "codecademy",
+        "infosys springboard", "great learning",
+    ]
+    top_hits     = sum(1 for c in top_cert_keywords     if c in text_low)
+    generic_hits = sum(1 for c in generic_cert_keywords if c in text_low)
+
+    if   top_hits >= 2:                        cert_pts = 10
+    elif top_hits >= 1 and generic_hits >= 1:  cert_pts = 8
+    elif top_hits >= 1:                        cert_pts = 7
+    elif generic_hits >= 3:                    cert_pts = 6
+    elif generic_hits >= 2:                    cert_pts = 5
+    elif generic_hits >= 1:                    cert_pts = 3
+    else:                                      cert_pts = 0
+    breakdown["certifications"] = cert_pts
+    details["certifications"] = (
+        "Strong certification profile with industry-recognized credentials!"
+        if cert_pts >= 7 else
+        "Good — add more recognised certs (AWS, Google, Microsoft, Oracle) for a higher score."
+        if cert_pts >= 3 else
+        "No certifications detected. Add at least one industry cert or online course certificate."
+    )
+
+    # ── 6. CONTACT COMPLETENESS (max 5) ───────────────────────────────────────
+    has_email     = bool(re.search(
+        r"\b[A-Za-z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b", text
+    ))
+    has_phone     = bool(re.search(r"\b\d{10}\b|\+\d{1,3}[\s\-]\d{5,}", text))
+    has_linkedin  = "linkedin" in text_low
+    has_github    = "github"   in text_low
+    has_portfolio = any(w in text_low for w in ["portfolio", "personal site", "website"])
+
+    contact_pts = (
+        (1 if has_email    else 0) +
+        (1 if has_phone    else 0) +
+        (1 if has_linkedin else 0) +
+        (1 if has_github   else 0) +
+        (1 if has_portfolio or (has_email and has_phone and has_linkedin and has_github) else 0)
+    )
+    contact_pts = min(contact_pts, 5)
+    breakdown["contact"] = contact_pts
+    missing_contact = []
+    if not has_email:    missing_contact.append("email")
+    if not has_phone:    missing_contact.append("phone")
+    if not has_linkedin: missing_contact.append("LinkedIn")
+    if not has_github:   missing_contact.append("GitHub")
+    details["contact"] = (
+        "Complete contact profile — email, phone, LinkedIn, and GitHub all present."
+        if contact_pts >= 4 else
+        "Add missing contact info: " + ", ".join(missing_contact) + "."
+        if missing_contact else
+        "Contact info present."
+    )
+
+    # ── 7. RESUME STRUCTURE / FORMATTING (max 5) ─────────────────────────────
+    has_summary  = any(
+        w in text_low
+        for w in ["objective", "summary", "career objective", "professional summary", "profile", "about me"]
+    )
+    section_keywords = [
+        "skills", "education", "experience", "project", "certification",
+        "achievement", "award", "publication", "volunteer", "extracurricular",
+    ]
+    n_sections = sum(1 for s in section_keywords if s in text_low)
+    word_count = len(text.split())
+
+    if   has_summary and n_sections >= 5 and word_count >= 300: fmt_pts = 5
+    elif has_summary and n_sections >= 4 and word_count >= 200: fmt_pts = 4
+    elif n_sections >= 4 and word_count >= 200:                 fmt_pts = 3
+    elif n_sections >= 3 and word_count >= 100:                 fmt_pts = 2
+    elif n_sections >= 2:                                       fmt_pts = 1
+    else:                                                       fmt_pts = 0
+    breakdown["formatting"] = fmt_pts
+    details["formatting"] = (
+        "Well-structured resume with Summary and all key sections labelled."
+        if fmt_pts >= 4 else
+        "Good structure — add an Objective/Summary section at the top for a higher score."
+        if (not has_summary and n_sections >= 3) else
+        "Ensure all main sections (Skills, Education, Projects, Experience) are clearly labelled."
+        if n_sections < 4 else
+        "Resume is sparse. Add more content and clearly labelled sections."
+    )
+
+    # ── Minimum floor ─────────────────────────────────────────────────────────
+    # If the document has real content but nothing matched at all, give a base
+    total = sum(breakdown.values())
+    if total == 0 and word_count >= 50:
+        total = 8
+        breakdown["skills"] = 8
+        details["skills"] = "Could not parse structured sections — check resume formatting."
+
+    return {
+        "total":     min(total, 100),
+        "breakdown": breakdown,
+        "details":   details,
+    }
+
+
+def calculate_ats_score(text: str, skills: List[str]) -> int:
+    """
+    Convenience wrapper — returns only the final integer score (0-100).
+    BUG-FIX-3: Uses the redesigned graduated scoring algorithm.
+    """
+    return calculate_ats_score_detailed(text, skills)["total"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEEDBACK GENERATOR  (BUG-FIX-8: expanded with breakdown + targeted tips)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_feedback(
+    score:     int,
+    role:      str,
+    skills:    List[str],
+    breakdown: Dict[str, int] = None,
+    details:   Dict[str, str] = None,
+) -> str:
+    """
+    Generate a rich, readable ATS feedback report.
+
+    BUG-FIX-8: Includes per-section score breakdown and targeted
+    improvement advice from the details dict when available.
+    The report format is designed to be both machine-parseable and
+    human-readable for the frontend ResumeEnhancer component.
+    """
+    strength = (
+        "Excellent"          if score >= 80
+        else "Good"          if score >= 60
+        else "Fair"          if score >= 40
+        else "Needs Improvement"
+    )
+
+    lines = [
+        f"ATS SCORE: {score}/100  [{strength}]",
+        f"RECOMMENDED ROLE: {role}",
+        "",
+        f"SKILLS DETECTED ({len(skills)}):",
+        f"{', '.join(skills[:60]) or 'None detected'}",
+        "",
+    ]
+
+    # ── Per-section score breakdown (SCORE-DETAIL-1) ─────────────────────────
+    if breakdown:
+        lines.append("SCORE BREAKDOWN:")
+        label_map = {
+            "skills":         ("Skills Coverage",       25),
+            "projects":       ("Projects & Impact",     20),
+            "experience":     ("Work Experience",       20),
+            "education":      ("Education",             15),
+            "certifications": ("Certifications",        10),
+            "contact":        ("Contact Information",    5),
+            "formatting":     ("Resume Structure",       5),
+        }
+        for key, (label, max_pts) in label_map.items():
+            pts = breakdown.get(key, 0)
+            filled  = "█" * pts
+            empty   = "░" * (max_pts - pts)
+            pct_bar = filled + empty
+            lines.append(f"  {label:<28} {pts:>2}/{max_pts}  {pct_bar}")
+        lines.append("")
+
+    # ── Per-section advice ────────────────────────────────────────────────────
+    if details:
+        lines.append("SECTION FEEDBACK:")
+        for key, note in details.items():
+            lines.append(f"  • {note}")
+        lines.append("")
+
+    # ── General improvement tips (score-gated) ────────────────────────────────
+    tips = []
+    if len(skills) < 8:
+        tips.append("• Add more technical skills relevant to your target role (aim for 8–15)")
+    if score < 90:
+        tips.append("• Quantify project outcomes (e.g., 'reduced checkout time by 35%', 'serving 5K+ users')")
+    if score < 80:
+        tips.append("• Add industry certifications (AWS, Google Cloud, Microsoft Azure) to boost score")
+        tips.append("• Group skills by category: Languages | Frameworks | Databases | Cloud | Tools")
+        tips.append("• Use strong action verbs to start each bullet: Developed, Implemented, Optimised")
+    if score < 60:
+        tips.append("• Add a professional Summary or Career Objective section at the top of your resume")
+        tips.append("• Ensure email and phone number are visible at the top")
+        tips.append("• Include LinkedIn profile URL and GitHub profile link")
+        tips.append("• Education section must show: degree name, institution name, and CGPA/percentage")
+    if score < 40:
+        tips.append("• Ensure your resume has clearly labelled sections: Skills, Education, Projects, Experience")
+        tips.append("• Minimum recommended length: 300 words / 1 page")
+
+    if tips:
+        lines.append("IMPROVEMENT TIPS:")
+        lines.extend(tips)
+
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT  (BUG-FIX-1 + BUG-FIX-3 + SCORE-DETAIL-1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def advanced_parse_resume(text: str) -> dict:
+    """
+    Full Phase 1 analysis pipeline.
+
+    BUG-FIX-1 : Returns BOTH the nested ats/ai_data structure AND flat
+                top-level keys so Java Spring controllers can read
+                ats_score and recommended_role directly from root JSON.
+
+    BUG-FIX-3 : ATS scoring redesigned — graduated, realistic scores.
+                No more every-resume-scores-100 problem.
+
+    BUG-FIX-6/7: College name extracted from full line, not anchored at
+                keyword. Label prefixes stripped cleanly.
+
+    SCORE-DETAIL-1: breakdown and details dicts surfaced in the response
+                so the frontend Resume Strength Meter can show per-category
+                scores without a second API call.
+
+    Returns:
+      {
+        # Flat top-level (for Java Spring Boot):
+        "ats_score", "recommended_role", "matched_keywords", "explanation"
+
+        # Nested (for React frontend):
+        "ats": { "ats_score", "recommended_role", "feedback",
+                 "breakdown", "details" }
+        "ai_data": { "profile", "education", "skills", "skill_count",
+                     "score_breakdown", "score_details",
+                     "confidence", "meta" }
+      }
+    """
+    profile   = extract_profile(text)
+    skills    = extract_skills(text)
+    education = extract_education(text)
+    meta      = extract_meta()
+    role      = predict_role(text, skills)
+
+    # Full detailed scoring with per-section breakdown
+    score_result = calculate_ats_score_detailed(text, skills)
+    ats_score    = score_result["total"]
+    breakdown    = score_result["breakdown"]
+    details      = score_result["details"]
+
+    feedback = generate_feedback(ats_score, role, skills, breakdown, details)
+
+    return {
+        # ── Flat top-level keys (for Java controller / direct JSON readers) ──
+        "ats_score":        ats_score,
+        "recommended_role": role,
+        "matched_keywords": skills,
+        "explanation":      feedback,
+
+        # ── Nested structure (for React frontend: result.ats.ats_score) ──────
+        "ats": {
+            "ats_score":        ats_score,
+            "recommended_role": role,
+            "feedback":         feedback,
+            "breakdown":        breakdown,
+            "details":          details,
+        },
+
+        # ── AI extracted data (for React: result.ai_data.*) ──────────────────
+        "ai_data": {
+            "profile":         profile,
+            "education":       education,
+            "skills":          skills,
+            "skill_count":     len(skills),
+            "score_breakdown": breakdown,   # mirrors ats.breakdown for easy access
+            "score_details":   details,
+            "confidence":      "PURE_AI_ENGINE_V3",
+            "meta":            meta,
+        },
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOCAL TEST  — run: python advanced_resume_ai.py
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    import json
+
+    # ── Test 1: Good Fresher ──────────────────────────────────────────────────
+    sample_fresher = """
+    Dhanush Kumar
+    dhanush.kumar@gmail.com  |  +91-9876543210  |  Chennai, Tamil Nadu
+    linkedin.com/in/dhanushkumar  |  github.com/dhanushkumar
+
+    OBJECTIVE
+    Seeking a challenging role as a Software Engineer to apply my skills.
+
+    EDUCATION
+    B.Tech in Computer Science
+    Vels Institute of Science, Technology & Advanced Studies
+    Chennai, Tamil Nadu | 2020 - 2024 | CGPA: 8.7/10
+
+    SKILLS
+    Python, Java, React, Spring Boot, MySQL, Docker, AWS, Git, Machine Learning, TypeScript
+
+    EXPERIENCE
+    Software Intern — Infosys, Chennai  (Jun 2023 – Dec 2023)
+    Developed REST API using Spring Boot integrated with MySQL database.
+    Implemented pagination reducing query response time by 40%.
+
+    PROJECTS
+    1. E-Commerce Platform
+       Built using React and Node.js, deployed on AWS EC2.
+       Reduced checkout latency by 35%, serving 5K+ daily users.
+    2. ML Image Classifier
+       Implemented deep learning model using TensorFlow achieving 92% accuracy.
+       Trained on 50K+ images, deployed via Flask REST API.
+
+    CERTIFICATIONS
+    AWS Certified Developer – Associate
+    Udemy: Full Stack Web Development (React + Node.js)
+    NPTEL: Data Structures and Algorithms
+    """
+
+    # ── Test 2: Minimal Resume ────────────────────────────────────────────────
+    sample_minimal = """
+    Raj
+    raj@email.com
+    Skills: Python, Java
+    Project: Built a calculator app
+    """
+
+    # ── Test 3: Experienced Developer ────────────────────────────────────────
+    sample_experienced = """
+    Priya Sharma
+    priya.sharma@gmail.com | +91-9876543211 | Bangalore, Karnataka
+    linkedin.com/in/priyasharma | github.com/priyasharma
+
+    SUMMARY
+    Senior Software Engineer with 5+ years of experience building scalable distributed systems.
+
+    EDUCATION
+    B.Tech in Computer Science — IIT Delhi  CGPA: 9.1/10
+
+    EXPERIENCE
+    Senior Software Engineer — Google, Bangalore  (2019 – 2024)  5+ years
+    Architected microservices platform serving 100K+ daily users.
+    Optimized database queries reducing latency by 60%.
+    Led team of 8 engineers, delivered 4 major product launches.
+    Automated CI/CD pipeline reducing deployment time by 75%.
+
+    SKILLS
+    Python, Java, React, Node.js, Docker, Kubernetes, AWS, MySQL, Redis,
+    GraphQL, TypeScript, Spring Boot, Kafka, Terraform, GitHub Actions,
+    Machine Learning, TensorFlow, Elasticsearch
+
+    PROJECTS
+    Distributed Cache System — Reduced API response time by 45% serving 1M+ requests/day.
+    ML Recommendation Engine — Increased click-through rate by 22% for 500K+ users.
+
+    CERTIFICATIONS
+    AWS Certified Solutions Architect – Professional
+    Google Cloud Professional Data Engineer
+    Oracle Certified Java Developer
+    """
+
+    for name, sample in [
+        ("GOOD FRESHER",    sample_fresher),
+        ("MINIMAL RESUME",  sample_minimal),
+        ("EXPERIENCED DEV", sample_experienced),
+    ]:
+        print("=" * 65)
+        print(f"TEST: {name}")
+        print("=" * 65)
+        r = advanced_parse_resume(sample)
+        print(f"  ATS Score   : {r['ats_score']}")
+        print(f"  Role        : {r['recommended_role']}")
+        print(f"  Skills ({r['ai_data']['skill_count']:>2}) : {', '.join(r['matched_keywords'][:10])}...")
+        print(f"  College     : {r['ai_data']['education'].get('college')}")
+        print(f"  CGPA        : {r['ai_data']['education'].get('cgpa')}")
+        print(f"  Breakdown   : {r['ats']['breakdown']}")
+        print()
+hr_shortlisting.py:
+"""
+hr_shortlisting.py
+──────────────────
+HR automation: candidate ranking, K-means clustering, auto-shortlisting,
+and insight generation. Pure ML — no LLM required.
+
+Fixes applied vs original:
+  BUG-1 : df['atsScore'].mean() raises if column has NaN values (e.g. when a
+           candidate dict is missing 'atsScore'). All numeric columns now filled
+           with 0 before arithmetic so pandas never produces NaN in output.
+  BUG-2 : cluster_candidates() could request more clusters than candidates
+           (n_clusters > len(candidates)), causing KMeans to crash.
+           Guard already existed but didn't handle the edge case len < 2.
+           Fixed with a max(1, …) guard.
+  BUG-3 : clusters dict used integer keys from df['cluster'] (int64), which
+           JSON serialises as numbers, not "cluster_0" strings. The
+           get_cluster_summary() then iterated over the wrong keys.
+           Fixed: cluster key is now always f"cluster_{int(cluster_id)}".
+  BUG-4 : rank_candidates() mutated the input dicts in place (adding 'rank'
+           and 'status' keys to the caller's original data). Fixed by copying.
+  BUG-5 : generate_hr_insights() — if 'atsScore' column is missing entirely,
+           the mean() call raises KeyError. Added safe accessor.
+"""
+
+from typing import List, Dict, Any
+from collections import defaultdict
+
+import pandas as pd
+import numpy as np
+from sklearn.cluster import KMeans
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RANKING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def rank_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Rank candidates by a composite score (ATS + experience + skills).
+    Returns a new list; input dicts are NOT mutated (BUG-4 fix).
+    """
+    if not candidates:
+        return []
+
+    # BUG-1 fix: fillna before arithmetic
+    df = pd.DataFrame(candidates).fillna(0)
+
+    df["rank_score"] = 0.0
+    if "atsScore" in df.columns:
+        df["rank_score"] += pd.to_numeric(df["atsScore"], errors="coerce").fillna(0)
+    if "experienceYears" in df.columns:
+        df["rank_score"] += pd.to_numeric(df["experienceYears"], errors="coerce").fillna(0) * 2
+    if "skillsMatch" in df.columns:
+        df["rank_score"] += pd.to_numeric(df["skillsMatch"], errors="coerce").fillna(0) * 0.5
+
+    df = df.sort_values("rank_score", ascending=False).reset_index(drop=True)
+
+    result = []
+    for i, row in df.iterrows():
+        # BUG-4 fix: build a new dict instead of mutating the original
+        candidate = row.to_dict()
+        candidate["rank"]   = int(i) + 1
+        candidate["status"] = "SHORTLISTED" if candidate.get("rank_score", 0) >= 70 else "PENDING"
+        # Convert numpy types → native Python for JSON serialisation
+        candidate = _serialise(candidate)
+        result.append(candidate)
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLUSTERING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cluster_candidates(
+    candidates: List[Dict[str, Any]],
+    n_clusters: int = 3,
+) -> Dict[str, Any]:
+    """
+    Group candidates into k clusters using K-means on numeric features.
+    """
+    if not candidates:
+        return {"clusters": {}, "total_clusters": 0, "cluster_summary": []}
+
+    # BUG-2 fix: clamp n_clusters
+    n_clusters = max(1, min(n_clusters, len(candidates)))
+
+    # Build feature matrix
+    features = []
+    for c in candidates:
+        features.append([
+            float(c.get("atsScore",       0) or 0),
+            float(c.get("experienceYears", 0) or 0),
+            float(c.get("skillsMatch",     0) or 0),
+            float(len(c.get("skills", [])) or 0),
+        ])
+
+    X  = np.array(features)
+    df = pd.DataFrame(candidates)
+
+    if len(X) >= n_clusters and n_clusters > 1:
+        kmeans      = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        df["cluster"] = kmeans.fit_predict(X)
+    else:
+        df["cluster"] = 0
+
+    # BUG-3 fix: always use string keys "cluster_0", "cluster_1", …
+    clusters: Dict[str, List] = defaultdict(list)
+    for _, row in df.iterrows():
+        key = f"cluster_{int(row['cluster'])}"
+        clusters[key].append(_serialise(row.to_dict()))
+
+    clusters_dict = dict(clusters)
+    return {
+        "clusters":        clusters_dict,
+        "total_clusters":  len(clusters_dict),
+        "cluster_summary": _get_cluster_summary(clusters_dict),
+    }
+
+
+def _get_cluster_summary(clusters: Dict[str, List]) -> List[Dict[str, Any]]:
+    summary = []
+    for cluster_name, members in clusters.items():
+        df = pd.DataFrame(members)
+
+        # BUG-1 fix: fillna before mean()
+        avg_ats = (
+            float(pd.to_numeric(df["atsScore"], errors="coerce").fillna(0).mean())
+            if "atsScore" in df.columns else 0.0
+        )
+        avg_exp = (
+            float(pd.to_numeric(df["experienceYears"], errors="coerce").fillna(0).mean())
+            if "experienceYears" in df.columns else 0.0
+        )
+
+        summary.append({
+            "cluster_name": cluster_name,
+            "size":         len(members),
+            "avg_ats_score": round(avg_ats, 2),
+            "avg_experience": round(avg_exp, 2),
+            "description":  _cluster_description(avg_ats),
+        })
+
+    return summary
+
+
+def _cluster_description(avg_ats: float) -> str:
+    if avg_ats >= 80:
+        return "Highly qualified candidates — top performers"
+    elif avg_ats >= 70:
+        return "Strong candidates — well qualified"
+    elif avg_ats >= 60:
+        return "Moderate candidates — potential with development"
+    else:
+        return "Entry-level candidates — require training"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTO-SHORTLISTING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def auto_shortlist_by_threshold(
+    candidates: List[Dict[str, Any]],
+    threshold: int = 70,
+) -> Dict[str, Any]:
+    """
+    Categorise candidates into SHORTLISTED / PENDING / REJECTED based on
+    their ATS score relative to the threshold.
+    """
+    shortlisted: List[Dict] = []
+    pending:     List[Dict] = []
+    rejected:    List[Dict] = []
+
+    for raw_candidate in candidates:
+        candidate  = dict(raw_candidate)      # BUG-4 fix: copy
+        ats_score  = float(candidate.get("atsScore", 0) or 0)
+
+        if ats_score >= threshold:
+            candidate["status"] = "SHORTLISTED"
+            shortlisted.append(candidate)
+        elif ats_score >= threshold - 10:
+            candidate["status"] = "PENDING"
+            pending.append(candidate)
+        else:
+            candidate["status"] = "REJECTED"
+            rejected.append(candidate)
+
+    return {
+        "shortlisted": shortlisted,
+        "pending":     pending,
+        "rejected":    rejected,
+        "summary": {
+            "total":             len(candidates),
+            "shortlisted_count": len(shortlisted),
+            "pending_count":     len(pending),
+            "rejected_count":    len(rejected),
+            "threshold_used":    threshold,
+        },
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INSIGHTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_hr_insights(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Generate aggregate insights about a candidate pool.
+    """
+    if not candidates:
+        return {
+            "total_candidates":   0,
+            "average_ats_score":  0.0,
+            "top_skills":         [],
+            "role_distribution":  {},
+            "recommendations":    ["No candidates found. Start by uploading resumes."],
+        }
+
+    # BUG-5 fix: safe column access with fillna
+    df = pd.DataFrame(candidates)
+
+    avg_ats = 0.0
+    if "atsScore" in df.columns:
+        avg_ats = float(
+            pd.to_numeric(df["atsScore"], errors="coerce").fillna(0).mean()
+        )
+
+    insights: Dict[str, Any] = {
+        "total_candidates":  len(candidates),
+        "average_ats_score": round(avg_ats, 2),
+        "top_skills":        _get_top_skills(candidates),
+        "role_distribution": _get_role_distribution(candidates),
+        "recommendations":   [],
+    }
+
+    # Generate recommendations
+    if avg_ats < 65:
+        insights["recommendations"].append(
+            "Overall candidate quality is below average. "
+            "Consider expanding recruitment channels or revising the JD."
+        )
+    if avg_ats >= 80:
+        insights["recommendations"].append(
+            "Strong candidate pool — recommend accelerating the shortlisting process."
+        )
+    if len(candidates) < 10:
+        insights["recommendations"].append(
+            "Small candidate pool. Recommend extending the application deadline."
+        )
+    if not insights["recommendations"]:
+        insights["recommendations"].append(
+            "Candidate pool looks healthy. Review top-ranked candidates first."
+        )
+
+    return insights
+
+
+def _get_top_skills(candidates: List[Dict[str, Any]]) -> List[Dict[str, int]]:
+    skill_count: Dict[str, int] = defaultdict(int)
+
+    for c in candidates:
+        for skill in c.get("skills", []):
+            if skill:
+                skill_count[str(skill)] += 1
+
+    sorted_skills = sorted(skill_count.items(), key=lambda x: x[1], reverse=True)
+    return [{"skill": s, "count": cnt} for s, cnt in sorted_skills[:10]]
+
+
+def _get_role_distribution(candidates: List[Dict[str, Any]]) -> Dict[str, int]:
+    role_count: Dict[str, int] = defaultdict(int)
+    for c in candidates:
+        role = c.get("recommendedRole") or "Unknown"
+        role_count[str(role)] += 1
+    return dict(role_count)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SERIALISATION HELPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _serialise(d: Dict) -> Dict:
+    """Convert numpy/pandas scalar types to native Python for JSON safety."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (np.integer,)):
+            out[k] = int(v)
+        elif isinstance(v, (np.floating,)):
+            out[k] = float(v)
+        elif isinstance(v, np.ndarray):
+            out[k] = v.tolist()
+        else:
+            out[k] = v
+    return out
+
+jd_tailor.py:
+"""
+jd_tailor.py
+─────────────
+Phase 2 — Tailors a resume to match a specific job description.
+Uses SentenceTransformers for semantic match score (no API key needed).
+
+Fixes applied vs original:
+  BUG-1 : Import `from services.llm_client` broke when not running from root.
+           Fixed to package-relative import.
+  BUG-2 : jd_match_score could be negative (cosine sim can be < 0).
+           Score now clamped to [0, 100].
+  BUG-3 : SentenceTransformer model was a bare module-level variable initialised
+           to None with a getter — a common pattern but fragile under import.
+           Wrapped in a proper lazy-singleton with exception handling.
+  BUG-4 : If sentence_transformers is not installed the entire service crashed
+           at import time. Added graceful ImportError fallback that uses a
+           keyword-overlap score instead.
+  BUG-5 : SentenceTransformer was downloading model from internet on every cold
+           start. Now loads from local path: services/models/all-MiniLM-L6-v2/
+"""
+
+import os
+import re
+from typing import Dict, Any, List, Optional
+
+from services.llm_client import get_llm_completion
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Local model path — place downloaded model files here:
+#   services/models/all-MiniLM-L6-v2/
+# ──────────────────────────────────────────────────────────────────────────────
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "all-MiniLM-L6-v2")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Lazy singleton for SentenceTransformer
+# ──────────────────────────────────────────────────────────────────────────────
+_sentence_model = None
+_sentence_model_available = None   # None = not yet checked
+
+
+def _get_sentence_model():
+    """Return a cached SentenceTransformer, or None if unavailable."""
+    global _sentence_model, _sentence_model_available
+
+    if _sentence_model_available is False:
+        return None
+
+    if _sentence_model is not None:
+        return _sentence_model
+
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        # BUG-5 fix: load from local path first, fall back to hub name
+        if os.path.isdir(_MODEL_PATH):
+            print(f"[jd_tailor] Loading SentenceTransformer from local path: {_MODEL_PATH}")
+            _sentence_model = SentenceTransformer(_MODEL_PATH)
+        else:
+            print("[jd_tailor] Local model not found, downloading from HuggingFace Hub…")
+            _sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        _sentence_model_available = True
+        return _sentence_model
+    except Exception as e:
+        print(f"[jd_tailor] SentenceTransformer unavailable: {e}  — using keyword fallback")
+        _sentence_model_available = False
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API
+# ══════════════════════════════════════════════════════════════════════════════
+
+def tailor_resume_to_jd(resume_text: str, job_description: str) -> Dict[str, Any]:
+    """
+    Tailors a resume to a specific job description.
+
+    Returns:
+        {
+            "tailored_resume":   str,
+            "jd_match_score":    float,   # 0–100
+            "key_requirements":  List[str],
+            "suggestions":       List[str]
+        }
+    """
+    jd_keywords    = _extract_jd_keywords(job_description)
+    match_score    = _calculate_jd_match(resume_text, job_description)
+    tailored       = _generate_tailored_resume(resume_text, job_description, jd_keywords)
+    suggestions    = _generate_suggestions(resume_text, jd_keywords)
+
+    return {
+        "tailored_resume":  tailored,
+        "jd_match_score":   match_score,
+        "key_requirements": jd_keywords[:10],
+        "suggestions":      suggestions,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# KEYWORD EXTRACTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COMMON_TECH_KEYWORDS = [
+    "java", "python", "javascript", "typescript", "kotlin", "go",
+    "react", "angular", "vue", "next.js",
+    "spring boot", "django", "flask", "node.js", "express", "fastapi",
+    "aws", "azure", "gcp", "docker", "kubernetes", "terraform",
+    "mysql", "postgresql", "mongodb", "redis", "elasticsearch",
+    "rest api", "microservices", "graphql", "grpc",
+    "ci/cd", "jenkins", "github actions",
+    "machine learning", "deep learning", "nlp", "data analysis",
+    "pandas", "numpy", "tensorflow", "pytorch", "scikit-learn",
+    "agile", "scrum", "jira", "linux", "git",
+]
+
+
+def _extract_jd_keywords(jd_text: str) -> List[str]:
+    """Extract tech keywords that appear in the job description."""
+    jd_lower = jd_text.lower()
+    found = [kw for kw in _COMMON_TECH_KEYWORDS if kw in jd_lower]
+    return found
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MATCH SCORE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _calculate_jd_match(resume: str, jd: str) -> float:
+    """
+    Compute a semantic similarity score [0, 100].
+    Falls back to keyword-overlap if SentenceTransformer is unavailable.
+    """
+    model = _get_sentence_model()
+
+    if model is not None:
+        return _semantic_score(resume, jd, model)
+    else:
+        return _keyword_overlap_score(resume, jd)
+
+
+def _semantic_score(resume: str, jd: str, model) -> float:
+    """Cosine similarity via SentenceTransformer, clamped to [0, 100]."""
+    try:
+        from sentence_transformers import util
+
+        res_emb = model.encode(resume, convert_to_tensor=True)
+        jd_emb  = model.encode(jd,     convert_to_tensor=True)
+        sim     = float(util.cos_sim(res_emb, jd_emb)[0][0])
+
+        # BUG-2 fix: cosine sim ∈ [-1, 1]; clamp to [0, 1] then scale
+        score = max(0.0, min(sim, 1.0)) * 100
+        return round(score, 2)
+
+    except Exception as e:
+        print(f"[jd_tailor] Semantic scoring failed: {e}")
+        return _keyword_overlap_score(resume, jd)
+
+
+def _keyword_overlap_score(resume: str, jd: str) -> float:
+    """
+    BUG-4 fix fallback: Jaccard-like keyword overlap score.
+    No external model required.
+    """
+    resume_words = set(re.findall(r"\b\w+\b", resume.lower()))
+    jd_words     = set(re.findall(r"\b\w+\b", jd.lower()))
+
+    # Remove very common stop words
+    stop = {"the", "a", "an", "and", "or", "in", "of", "to", "for",
+            "is", "are", "with", "on", "at", "by", "we", "you", "your"}
+    jd_words     -= stop
+    resume_words -= stop
+
+    if not jd_words:
+        return 0.0
+
+    overlap = resume_words & jd_words
+    score   = (len(overlap) / len(jd_words)) * 100
+    return round(min(score, 100.0), 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAILORED RESUME GENERATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_tailored_resume(resume: str, jd: str, keywords: List[str]) -> str:
+    kw_str = ", ".join(keywords[:10]) if keywords else "the listed requirements"
+
+    prompt = f"""You are an expert resume tailor. Customise the resume below to match the job \
+description while staying truthful and accurate.
+
+JOB DESCRIPTION:
+{jd}
+
+ORIGINAL RESUME:
+{resume}
+
+KEY REQUIREMENTS TO EMPHASISE: {kw_str}
+
+INSTRUCTIONS:
+1. Reorder skills to prioritise those in the JD
+2. Rephrase project descriptions to align with JD requirements
+3. Emphasise experience that matches the JD
+4. Use JD keywords naturally throughout — do NOT add false information
+5. Maintain the same overall structure
+
+Return only the tailored resume. No preamble or explanation.
+"""
+
+    result = get_llm_completion(prompt)
+
+    if not result or len(result.strip()) < 50:
+        # Fallback: return original with a header note
+        result = (
+            f"[Tailored for: {kw_str}]\n\n"
+            + resume
+        )
+
+    return result.strip()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUGGESTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_suggestions(resume: str, jd_keywords: List[str]) -> List[str]:
+    resume_lower = resume.lower()
+    suggestions  = []
+
+    missing = [kw for kw in jd_keywords[:15] if kw not in resume_lower]
+    if missing:
+        suggestions.append(
+            f"Consider adding these keywords if relevant to your experience: "
+            f"{', '.join(missing[:5])}"
+        )
+
+    if "projects" not in resume_lower and "experience" not in resume_lower:
+        suggestions.append(
+            "Add a Projects or Experience section to showcase relevant work"
+        )
+
+    action_verbs = ["developed", "implemented", "designed", "led", "architected"]
+    if not any(v in resume_lower for v in action_verbs):
+        suggestions.append(
+            "Use strong action verbs to start each bullet point "
+            "(Developed, Implemented, Designed, Led…)"
+        )
+
+    suggestions.append(
+        "Ensure your Skills section is placed near the top for ATS visibility"
+    )
+
+    return suggestions
+
+llm_client.py:
+"""
+llm_client.py
+─────────────
+Unified LLM interface with graceful fallback chain:
+  Groq   (if GROQ_API_KEY set)       — fastest, free tier
+  OpenAI (if OPENAI_API_KEY set)     — GPT-3.5-turbo / GPT-4
+  Mistral(if MISTRAL_API_KEY set)    — mistral-small
+  GPT-2  (local, always available)   — offline fallback ONLY when NO API keys set
+  Rule-based (always available)      — no dependencies
+
+TWO PROCESSES:
+  Process 1 — AI Path: Groq -> OpenAI -> Mistral -> GPT-2 (all return normalized output)
+  Process 2 — Rule-based Path: triggered ONLY when ALL AI options fail
+
+FIX-LLM-PRIORITY:
+  - get_llm_completion() now ALWAYS tries ALL LLM backends before rule-based.
+  - Groq is tried REGARDLESS of which other keys are set.
+  - Rule-based is a last resort, never the first choice.
+  - expect_json=True still skips GPT-2 (can't produce JSON) but still tries
+    Groq/OpenAI/Mistral fully before falling back to rule-based JSON.
+
+FIX-GPT2-SKIP:
+  - GPT-2 is now SKIPPED entirely when ANY real API key (Groq/OpenAI/Mistral)
+    is configured. GPT-2 is only used as a fallback when NO API keys are set at all.
+  - This prevents the 24-30s GPT-2 slowdown when cloud LLMs are available.
+
+FIX-HTTP-CLIENT:
+  - Both httpx and requests are tried for HTTP calls (httpx preferred).
+  - Detailed error logging added so failures are visible in console.
+  - Connection timeouts separated from read timeouts for better diagnostics.
+"""
+
+import os
+import re
+import json
+import random
+import logging
+from typing import Optional
+
+log = logging.getLogger("llm_client")
+
+# Module-level cache (lazy loaded)
+_gpt2_pipeline = None
+
+
+def _has_any_api_key() -> bool:
+    """Return True if at least one real cloud LLM API key is configured."""
+    return bool(
+        os.getenv("GROQ_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("MISTRAL_API_KEY")
+    )
+
+
+def get_llm_completion(prompt: str, model: str = "auto", expect_json: bool = False) -> str:
+    """
+    Main entry point.
+
+    Priority order (ALWAYS):
+      1. Groq        (if GROQ_API_KEY set)
+      2. OpenAI GPT  (if OPENAI_API_KEY set)
+      3. Mistral     (if MISTRAL_API_KEY set)
+      4. GPT-2 local (ONLY when NO API keys set AND expect_json=False)
+      5. Rule-based  (guaranteed fallback — LAST RESORT ONLY)
+
+    Args:
+        prompt:      The prompt to send to the LLM.
+        model:       "auto" | "groq" | "gpt" | "mistral" | "local"
+                     "auto" tries all available APIs in priority order.
+        expect_json: If True, skips GPT-2 (which cannot produce valid JSON)
+                     and goes straight to rule-based JSON coercion.
+    """
+    # Always try AI backends first
+    result = _run_ai_process(prompt, model, skip_local=expect_json)
+
+    if result is None:
+        log.warning("[llm_client] All AI backends failed — using rule-based fallback (last resort)")
+        result = _rule_based_response(prompt)
+
+    if expect_json:
+        return _ensure_json(result, prompt)
+
+    return result
+
+
+def _run_ai_process(prompt: str, model: str, skip_local: bool = False) -> Optional[str]:
+    """
+    Try every AI backend in priority order.
+    Returns None only if ALL backends fail — caller then uses rule-based.
+
+    FIX-LLM-PRIORITY: Groq is ALWAYS attempted first when model=="auto",
+    regardless of what other keys are configured.
+
+    FIX-GPT2-SKIP: GPT-2 is skipped entirely when any cloud API key is present.
+    This prevents 24-30s delays from GPT-2 inference when Groq/Mistral are available.
+    """
+
+    # ── 1. Groq (fastest, free tier — always first) ───────────────────────────
+    if model in ("auto", "groq") and os.getenv("GROQ_API_KEY"):
+        result = _get_groq_completion(prompt)
+        if result:
+            return result
+
+    # ── 2. OpenAI GPT ─────────────────────────────────────────────────────────
+    if model in ("auto", "gpt") and os.getenv("OPENAI_API_KEY"):
+        result = _get_gpt_completion(prompt)
+        if result:
+            return result
+
+    # ── 3. Mistral ────────────────────────────────────────────────────────────
+    if model in ("auto", "mistral") and os.getenv("MISTRAL_API_KEY"):
+        result = _get_mistral_completion(prompt)
+        if result:
+            return result
+
+    # ── 4. GPT-2 local ────────────────────────────────────────────────────────
+    # FIX-GPT2-SKIP: Only use GPT-2 when NO cloud API keys are configured.
+    # If Groq/OpenAI/Mistral keys exist but the calls failed, return None so
+    # the rule-based fallback is used instead of waiting 24-30s for GPT-2.
+    if not skip_local and not _has_any_api_key():
+        result = _get_local_completion(prompt)
+        if result:
+            return result
+
+    return None
+
+
+def _make_http_post(url: str, headers: dict, data: dict, timeout: int = 30) -> Optional[dict]:
+    """
+    Attempt HTTP POST using httpx first, then requests as fallback.
+    Returns parsed JSON dict or None on failure.
+
+    FIX-HTTP-CLIENT: Using httpx as the primary client because it handles
+    connection issues more gracefully. Falls back to requests if httpx
+    is not installed. Detailed errors are logged for debugging.
+    """
+    # ── Try httpx first (preferred) ───────────────────────────────────────────
+    try:
+        import httpx
+        with httpx.Client(timeout=httpx.Timeout(timeout, connect=10)) as client:
+            response = client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+    except ImportError:
+        pass  # httpx not installed — fall through to requests
+    except Exception as e:
+        log.warning(f"[llm_client] httpx POST to {url} failed: {type(e).__name__}: {e}")
+        return None
+
+    # ── Fallback: requests ────────────────────────────────────────────────────
+    try:
+        import requests as req
+        response = req.post(url, json=data, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        log.warning(f"[llm_client] requests POST to {url} failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _get_groq_completion(prompt: str) -> Optional[str]:
+    """
+    Call Groq API (llama-3.3-70b-versatile).
+    FIX-HTTP-CLIENT: Uses _make_http_post() with dual httpx/requests support.
+    """
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    log.info("[llm_client] Trying Groq (llama-3.3-70b-versatile)...")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert resume writer and career coach. "
+                    "Always respond with valid JSON when asked for JSON."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens":  2000,
+    }
+
+    try:
+        json_data = _make_http_post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            data=data,
+            timeout=30,
+        )
+        if json_data is None:
+            log.warning("[llm_client] ⚠️  Groq: HTTP request failed — trying next backend")
+            return None
+
+        content = json_data["choices"][0]["message"]["content"]
+        if content and content.strip():
+            log.info("[llm_client] ✅ Groq responded successfully")
+            return content.strip()
+
+        log.warning("[llm_client] ⚠️  Groq: empty content in response")
+        return None
+
+    except Exception as e:
+        log.warning(f"[llm_client] ⚠️  Groq failed: {type(e).__name__}: {e} — trying next backend")
+        return None
+
+
+def _get_gpt_completion(prompt: str) -> Optional[str]:
+    """Call OpenAI GPT-3.5-turbo."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    log.info("[llm_client] Trying OpenAI GPT-3.5-turbo...")
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an expert resume writer and career coach."},
+                {"role": "user",   "content": prompt},
+            ],
+            max_tokens=2000,
+            temperature=0.7,
+        )
+        content = response.choices[0].message.content
+        if content and content.strip():
+            log.info("[llm_client] ✅ OpenAI GPT responded successfully")
+            return content.strip()
+        log.warning("[llm_client] ⚠️  OpenAI GPT: empty response")
+        return None
+    except Exception as e:
+        log.warning(f"[llm_client] ⚠️  GPT API failed: {type(e).__name__}: {e} — trying next backend")
+        return None
+
+
+def _get_mistral_completion(prompt: str) -> Optional[str]:
+    """
+    Call Mistral API (mistral-small-latest).
+    FIX-HTTP-CLIENT: Uses _make_http_post() with dual httpx/requests support.
+    FIX-MODEL-NAME: Updated to 'mistral-small-latest' (mistral-small deprecated).
+    """
+    api_key = os.getenv("MISTRAL_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    log.info("[llm_client] Trying Mistral (mistral-small-latest)...")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "model": "mistral-small-latest",
+        "messages": [
+            {"role": "system", "content": "You are an expert resume writer and career coach."},
+            {"role": "user",   "content": prompt},
+        ],
+        "temperature": 0.7,
+        "max_tokens":  2000,
+    }
+
+    try:
+        json_data = _make_http_post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers=headers,
+            data=data,
+            timeout=30,
+        )
+        if json_data is None:
+            log.warning("[llm_client] ⚠️  Mistral: HTTP request failed — trying next backend")
+            return None
+
+        content = (
+            json_data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+        if content and content.strip():
+            log.info("[llm_client] ✅ Mistral responded successfully")
+            return content.strip()
+
+        log.warning("[llm_client] ⚠️  Mistral: empty content in response")
+        return None
+
+    except Exception as e:
+        log.warning(f"[llm_client] ⚠️  Mistral API failed: {type(e).__name__}: {e} — trying next backend")
+        return None
+
+
+def _get_local_completion(prompt: str) -> Optional[str]:
+    """
+    GPT-2 local inference — ONLY used when NO cloud API keys are configured.
+    FIX-GPT2-SKIP: _run_ai_process() guards this with _has_any_api_key() check.
+    """
+    global _gpt2_pipeline
+    try:
+        from transformers import pipeline
+        if _gpt2_pipeline is None:
+            log.info("[llm_client] Loading GPT-2 pipeline (first call only)...")
+            _gpt2_pipeline = pipeline("text-generation", model="gpt2")
+        short_prompt = prompt[-500:] if len(prompt) > 500 else prompt
+        result = _gpt2_pipeline(
+            short_prompt,
+            max_new_tokens=200,
+            num_return_sequences=1,
+            pad_token_id=50256,
+            truncation=True,
+            do_sample=True,
+            temperature=0.7,
+        )
+        generated = result[0].get("generated_text", "")
+        if generated.startswith(short_prompt):
+            generated = generated[len(short_prompt):].strip()
+        if not generated or len(generated.strip()) < 10:
+            log.warning("[llm_client] GPT-2 returned empty/too-short output — trying rule-based")
+            return None
+        return generated
+    except Exception as e:
+        log.warning(f"[llm_client] Local GPT-2 failed: {e}")
+        return None
+
+
+def _rule_based_response(prompt: str) -> str:
+    """
+    Pure rule-based generation — no ML, no network.
+    LAST RESORT ONLY — only called when every LLM backend has failed.
+    """
+    log.info("[llm_client] 🔄 Using rule-based fallback (all LLMs unavailable)")
+    if any(kw in prompt.lower() for kw in ["rewrite", "enhance", "improve", "tailor"]):
+        return _improve_text_with_rules(prompt)
+    if any(kw in prompt.lower() for kw in ["skill", "suggest", "recommend"]):
+        return _suggest_skills_rules(prompt)
+    return "Enhanced resume with improved structure, professional language, and ATS-friendly formatting."
+
+
+def _improve_text_with_rules(text: str) -> str:
+    """Replace weak verbs with strong action verbs."""
+    weak_to_strong = {
+        r"\bmade\b":             "developed",
+        r"\bdid\b":              "executed",
+        r"\bworked on\b":        "contributed to",
+        r"\bhelped\b":           "facilitated",
+        r"\bused\b":             "leveraged",
+        r"\bgot\b":              "achieved",
+        r"\bwrote\b":            "authored",
+        r"\bfixed\b":            "resolved",
+        r"\bhandled\b":          "managed",
+        r"\bwas in charge of\b": "led",
+    }
+    improved = text
+    for pattern, replacement in weak_to_strong.items():
+        improved = re.sub(pattern, replacement, improved, flags=re.IGNORECASE)
+    return improved
+
+
+def _suggest_skills_rules(prompt: str) -> str:
+    """Return a sensible default skill list when AI is unavailable."""
+    default_skills = [
+        "Communication", "Problem Solving", "Team Collaboration",
+        "Time Management", "Critical Thinking", "Adaptability",
+        "Project Management", "Attention to Detail",
+    ]
+    return ", ".join(default_skills)
+
+
+def _ensure_json(text: str, prompt: str) -> str:
+    """
+    Guarantee the returned string is valid JSON.
+    Priority:
+      1. text is already valid JSON → return as-is
+      2. text contains a JSON block → extract and return it
+      3. Build a structured JSON from the plain text (rule-based safety net)
+    """
+    # 1. Already valid JSON?
+    try:
+        json.loads(text)
+        return text
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 2. Contains a JSON block?
+    json_match = re.search(r"```json\s*([\s\S]+?)\s*```", text)
+    if not json_match:
+        json_match = re.search(r"(\{[\s\S]+\}|\[[\s\S]+\])", text)
+    if json_match:
+        candidate = json_match.group(1).strip()
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Build structured fallback JSON based on prompt context
+    prompt_lower = prompt.lower()
+
+    if "missing_technical" in prompt_lower or (
+        "certification" in prompt_lower and "trending" in prompt_lower
+    ):
+        payload = {
+            "missing_technical": ["Docker", "Kubernetes", "CI/CD Pipelines", "Redis", "System Design"],
+            "trending": ["LLM Fine-Tuning", "RAG", "LangChain", "Vector Databases", "Kubernetes"],
+            "soft_skills": [
+                "Cross-functional Collaboration", "Technical Communication",
+                "Agile / Scrum", "Problem Decomposition",
+            ],
+            "certifications": [
+                {"name": "AWS Certified Developer - Associate", "provider": "Amazon",  "level": "Intermediate"},
+                {"name": "Certified Kubernetes Administrator (CKA)", "provider": "CNCF", "level": "Advanced"},
+            ],
+            "role_gap_analysis": (
+                "Focus on cloud and DevOps skills to improve ATS score and role match. "
+                "Add LLM/AI skills (RAG, LangChain) for maximum 2025 relevance."
+            ),
+        }
+    elif "one_liner" in prompt_lower or "full_summary" in prompt_lower:
+        payload = {
+            "one_liner": "Designed the project delivering a production-ready solution with measurable improvements.",
+            "full_summary": (
+                "Developed a scalable system using modern technologies with best practices "
+                "including automated testing and CI/CD pipelines."
+            ),
+            "highlights": [
+                "Implemented RESTful APIs",
+                "Configured database with lazy loading",
+                "Achieved 85%+ test coverage",
+            ],
+            "impact_metrics": [
+                "Reduced API latency by 35%",
+                "Serving 10,000+ daily requests",
+                "Zero-downtime deployments",
+            ],
+        }
+    elif "skills_to_add" in prompt_lower or "keywords_to_include" in prompt_lower:
+        payload = {
+            "skills_to_add": ["Docker", "Kubernetes", "REST API", "MySQL", "Git", "CI/CD", "Spring Boot", "AWS"],
+            "projects_to_add": [
+                {
+                    "title": "Microservices Order Management System",
+                    "description": "Distributed order processing with Spring Boot microservices and Kafka.",
+                    "tech_stack": ["Spring Boot", "Kafka", "Docker", "PostgreSQL"],
+                }
+            ],
+            "keywords_to_include": [
+                "microservices", "REST API", "agile", "scalable", "cloud", "docker", "CI/CD", "database",
+            ],
+            "action_plan": [
+                "Add missing skills to your Skills section",
+                "Build a microservices project to match the JD",
+                "Weave JD keywords into your bullet points",
+                "Reorder Skills section to mirror JD priority",
+                "Tailor your summary to reflect the job title",
+            ],
+        }
+    elif any(kw in prompt_lower for kw in ["rewrite", "enhance", "improve"]):
+        payload = {"enhanced_text": text.strip(), "source": "rule-based"}
+    else:
+        payload = {"result": text.strip(), "source": "rule-based"}
+
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def enhance_with_quantification(text: str) -> str:
+    quantifiers = [
+        "improving efficiency by 40%",
+        "reducing processing time by 50%",
+        "serving 100+ users",
+        "achieving 30% performance gain",
+        "cutting deployment time by 60%",
+    ]
+    has_metric = any(
+        kw in text.lower()
+        for kw in ["by", "improved", "reduced", "increased", "%", "users", "clients"]
+    )
+    if not has_metric:
+        text = text.rstrip(".") + f", thereby {random.choice(quantifiers)}."
+    return text
+
+
+def get_active_backends() -> dict:
+    """Returns which LLM backends are currently configured."""
+    return {
+        "groq":       bool(os.getenv("GROQ_API_KEY")),
+        "openai":     bool(os.getenv("OPENAI_API_KEY")),
+        "mistral":    bool(os.getenv("MISTRAL_API_KEY")),
+        "gpt2":       not _has_any_api_key(),   # GPT-2 only active when no API keys set
+        "rule_based": True,
+    }
+
+project_enhancer.py:
+"""
+project_enhancer.py
+────────────────────
+Phase 2 — Transforms plain project descriptions into quantified achievements.
+
+Fixes applied vs original:
+  BUG-1 : Import path used `from services.llm_client` (works only from root).
+           Changed to package-relative for consistent behaviour.
+  BUG-2 : No guard against empty/whitespace-only project strings — these caused
+           the LLM to generate nonsense. Added validation before calling LLM.
+  BUG-3 : add_technical_depth() replacement logic was too aggressive:
+           "system" → "scalable system architecture" would corrupt e.g.
+           "file system" → "file scalable system architecture".
+           Fixed with word-boundary regex.
+
+FIX-TIMEOUT:
+  The original code called the LLM ONCE PER PROJECT in a loop, which caused
+  timeouts when GPT-2 was the backend (24s per project × N projects).
+  Now ALL projects are sent to the LLM in a SINGLE BATCH CALL using a
+  structured JSON prompt. This is:
+    - Faster: 1 API round-trip instead of N
+    - More reliable: avoids repeated timeout risk
+    - Better quality: LLM sees all projects together for consistency
+
+FIX-LLM-PRIORITY:
+  Uses get_llm_completion(model="auto") so Groq → OpenAI → Mistral are
+  all tried before GPT-2 or rule-based fallback.
+"""
+
+import re
+import json
+import logging
+from typing import Dict, List, Any
+
+from services.llm_client import get_llm_completion, enhance_with_quantification
+
+log = logging.getLogger("project_enhancer")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PUBLIC API
+# ══════════════════════════════════════════════════════════════════════════════
+
+def enhance_projects(projects: List[str]) -> Dict[str, Any]:
+    """
+    Enhance a list of project descriptions.
+
+    FIX-TIMEOUT: Sends ALL projects in a single LLM call instead of one
+    call per project, preventing the 30s read timeout on /project-enhance.
+
+    Args:
+        projects: List of plain-text project descriptions.
+
+    Returns:
+        {
+            "enhanced_projects": List[str],
+            "total_enhanced": int
+        }
+    """
+    # BUG-2 fix: filter empty strings before processing
+    valid_projects = [p.strip() for p in projects if p and p.strip()]
+
+    if not valid_projects:
+        return {"enhanced_projects": [], "total_enhanced": 0}
+
+    # FIX-TIMEOUT: Try single-batch LLM call for all projects
+    enhanced = _enhance_projects_batch(valid_projects)
+
+    return {
+        "enhanced_projects": enhanced,
+        "total_enhanced":    len(enhanced),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BATCH LLM ENHANCEMENT (FIX-TIMEOUT)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _enhance_projects_batch(projects: List[str]) -> List[str]:
+    """
+    Send all projects to the LLM in a single call and parse the JSON response.
+
+    FIX-TIMEOUT: One API call for all N projects = no per-project timeout risk.
+    Falls back to per-project rule-based enhancement if LLM fails.
+    """
+    # Build a numbered list of projects for the prompt
+    numbered = "\n".join(
+        f"{i+1}. {proj}" for i, proj in enumerate(projects)
+    )
+
+    prompt = f"""You are a technical resume expert. Rewrite each project description below as a \
+single powerful resume bullet point.
+
+GUIDELINES for EACH bullet:
+1. Start with a strong past-tense action verb (Developed, Built, Implemented, Designed, etc.)
+2. Include the specific technologies / tools used
+3. Quantify the impact (e.g., "improving response time by 40%", "serving 500+ users")
+4. Keep each bullet to 1-2 lines maximum
+5. Format: • [Action Verb] [What you built] using [Tech Stack], [Quantified Impact]
+
+PROJECTS TO ENHANCE:
+{numbered}
+
+Return a JSON array with exactly {len(projects)} strings, one enhanced bullet per project.
+Example format: ["• Developed ...", "• Built ..."]
+Return ONLY the JSON array. No explanation, no markdown fences."""
+
+    try:
+        raw = get_llm_completion(prompt, model="auto", expect_json=False)
+
+        if not raw or len(raw.strip()) < 10:
+            raise ValueError("LLM returned empty response")
+
+        # Try to parse as JSON array
+        enhanced_list = _parse_bullet_list(raw, len(projects))
+
+        if enhanced_list and len(enhanced_list) == len(projects):
+            log.info(f"[project_enhancer] ✅ LLM batch enhanced {len(projects)} projects")
+            return [b.strip() for b in enhanced_list]
+
+        # Partial result — return what we got, fill rest with rule-based
+        if enhanced_list and len(enhanced_list) > 0:
+            log.warning(
+                f"[project_enhancer] LLM returned {len(enhanced_list)}/{len(projects)} bullets — "
+                "filling remainder with rule-based"
+            )
+            result = list(enhanced_list)
+            for i in range(len(enhanced_list), len(projects)):
+                result.append(_rule_based_enhance(projects[i]))
+            return result
+
+        raise ValueError(f"Could not parse LLM output as bullet list: {raw[:200]}")
+
+    except Exception as e:
+        log.warning(f"[project_enhancer] Batch LLM failed ({e}) — using rule-based for all projects")
+        return [_rule_based_enhance(p) for p in projects]
+
+
+def _parse_bullet_list(raw: str, expected_count: int) -> List[str]:
+    """
+    Parse LLM output into a list of bullet strings.
+    Handles:
+      - Clean JSON arrays: ["• Developed ...", "• Built ..."]
+      - JSON in markdown fences: ```json [...]```
+      - Numbered plain text: 1. • Developed ...
+    """
+    text = raw.strip()
+
+    # 1. Strip markdown fences
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # 2. Try direct JSON parse
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 3. Try extracting a JSON array from the text
+    array_match = re.search(r"\[[\s\S]+\]", text)
+    if array_match:
+        try:
+            parsed = json.loads(array_match.group())
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # 4. Try numbered list parsing: "1. • Developed..." or "1. Developed..."
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    bullets = []
+    for line in lines:
+        # Remove leading number + dot/paren: "1. ", "1) ", "1 - "
+        cleaned = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+        if cleaned and len(cleaned) > 10:
+            bullets.append(cleaned)
+
+    if len(bullets) >= expected_count:
+        return bullets[:expected_count]
+
+    # 5. Collect any line starting with • or -
+    bullet_lines = [
+        l.strip() for l in text.split("\n")
+        if l.strip().startswith(("•", "-", "*")) and len(l.strip()) > 10
+    ]
+    if bullet_lines:
+        return bullet_lines[:expected_count]
+
+    return []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RULE-BASED FALLBACK (single project)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# BUG-3 fix: word-boundary replacements
+_TECH_UPGRADES = {
+    r"\bwebsite\b":  "full-stack web application",
+    r"\bapp\b":      "mobile application",
+    r"\bsystem\b":   "scalable system",
+    r"\bdatabase\b": "relational database with optimised queries",
+    r"\bapi\b":      "RESTful API with JWT authentication",
+    r"\btool\b":     "utility tool",
+    r"\bscript\b":   "automation script",
+    r"\bmodel\b":    "ML model",
+}
+
+
+def _add_technical_depth(project: str) -> str:
+    """Replace generic nouns with more technical equivalents (word-boundary safe)."""
+    enhanced = project
+    for pattern, replacement in _TECH_UPGRADES.items():
+        enhanced = re.sub(pattern, replacement, enhanced, flags=re.IGNORECASE)
+    return enhanced
+
+
+def _rule_based_enhance(project: str) -> str:
+    """
+    Applies deterministic improvements without an LLM.
+    Used as fallback when LLM is unavailable or returns poor output.
+    """
+    improved = _add_technical_depth(project)
+    improved = enhance_with_quantification(improved)
+
+    # Ensure starts with a capital action verb
+    action_verbs = [
+        "Developed", "Built", "Implemented", "Designed",
+        "Created", "Architected", "Engineered", "Deployed",
+    ]
+    first_word = improved.split()[0] if improved.split() else ""
+    if first_word.lower() not in [v.lower() for v in action_verbs]:
+        improved = f"Developed {improved[0].lower() + improved[1:]}"
+
+    return f"• {improved}"
+
+resume_rewriter.py:
+# resume_rewriter.py
+# ─── Phase 2: Resume Rewriting + Skill Gap Analysis ──────────────────────────
+#
+# FIXES APPLIED (original rewrite module):
+#   FIX-1 : LLM is now ALWAYS attempted first (Groq → OpenAI → Mistral).
+#            Rule-based NLP is used ONLY as a last resort when ALL LLM
+#            backends fail — not the other way around.
+#   FIX-2 : _extract_improvements() uses meaningful checks (verb counts,
+#            quantification detection, weak-verb reduction) instead of a
+#            trivial length comparison.
+#   FIX-3 : The LLM prompt includes the FULL original resume so every
+#            resume gets a unique, personalised rewrite — not a generic
+#            template identical for all inputs.
+#
+# FIX-GPT2-GARBAGE:
+#   Added _is_valid_rewrite() to detect and reject GPT-2 hallucinations.
+#   If validation fails, rule-based rewrite is used instead.
+#
+# ADDED — Skill Gap Analysis (was skill_gap.py, merged here):
+#   POST /ai/suggest-skills  →  { resumeText: string }
+#   Strategy: LLM-first (LLaMA-3-70B → 8B → Mistral), NLP fallback on failure.
+#   Uses the same _is_valid_rewrite logic and groq_client as rewrite_resume().
+#   Response includes source: "llm" | "nlp_fallback" for frontend badge.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+import re
+import json
+import asyncio
+import logging
+from typing import Dict, Any, Optional
+
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from groq import Groq
+
+# Phase 1 NLP imports (already present in your project)
+import spacy
+from sentence_transformers import SentenceTransformer, util
+
+from services.llm_client import get_llm_completion, _improve_text_with_rules
+
+log    = logging.getLogger("resume_rewriter")
+router = APIRouter(prefix="/ai", tags=["Phase2-ResumeAI"])
+
+# ── Prevent HuggingFace network calls on startup ──────────────────────────────
+# The model is already in local cache. These env vars stop the HEAD request to
+# huggingface.co that causes 30-second startup delays when offline.
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_OFFLINE",       "1")
+
+# ── Shared clients (rewrite + skill gap both use these) ───────────────────────
+# timeout: connect=10s, read=60s — gives Groq enough time for the 70B model
+# max_retries=2 auto-retries transient network errors (NOT timeouts, by design)
+groq_client = Groq(
+    api_key=os.environ.get("GROQ_API_KEY"),
+    # connect=8s: fail fast if Groq is unreachable
+    # read=25s: enough for LLaMA-3-70B; shorter = faster retry on slow responses
+    timeout=httpx.Timeout(connect=8.0, read=25.0, write=8.0, pool=5.0),
+    max_retries=2,
+)
+nlp         = spacy.load("en_core_web_sm")
+
+# local_files_only=True — load from cache without any network request.
+# If cache is missing (first run), temporarily re-enables download.
+try:
+    embedder = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
+    log.info("[resume_rewriter] SentenceTransformer loaded from local cache.")
+except Exception as _st_err:
+    log.warning(
+        f"[resume_rewriter] Local cache miss ({_st_err}). "
+        "Downloading model — connect to the internet once to cache it."
+    )
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    os.environ.pop("HF_HUB_OFFLINE",       None)
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+# ── Groq model priority list (shared by both features) ────────────────────────
+LLM_MODELS = [
+    "llama3-70b-8192",     # primary  : LLaMA 3 70B
+    "llama3-8b-8192",      # secondary: LLaMA 3 8B (faster fallback)
+    "mixtral-8x7b-32768",  # tertiary : Mistral
+]
+
+# ── Hallucination phrases (shared validator) ──────────────────────────────────
+_HALLUCINATION_PHRASES = [
+    "actual content is not part of",
+    "i will use a full blown",
+    "i will now create",
+    "here is a full blown",
+    "this is a placeholder",
+    "lorem ipsum",
+    "the following is a sample",
+    "note: this is a fictional",
+    "disclaimer:",
+    "as an ai language model",
+    "as a language model",
+    "as an ai",
+    "i cannot create a resume",
+    "i am unable to",
+    "i don't have access to",
+    "here is a sample",
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHARED VALIDATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_valid_rewrite(result: str, original: str, min_len: int = 100) -> bool:
+    """
+    Validate that LLM output is genuine and not hallucinated / off-topic.
+    Used by BOTH rewrite_resume() and suggest_skills().
+
+    FIX-GPT2-GARBAGE: Returns False if the output:
+      - Is too short (< min_len chars)
+      - Contains hallucination marker phrases
+      - Has < 5% word overlap with the original resume
+    """
+    if not result or len(result.strip()) < min_len:
+        return False
+
+    result_lower = result.lower()
+    for phrase in _HALLUCINATION_PHRASES:
+        if phrase in result_lower:
+            log.warning(f"[resume_rewriter] Hallucination phrase: '{phrase}'")
+            return False
+
+    # Content overlap check — JSON output has lower overlap threshold
+    original_words = set(
+        w.lower() for w in re.findall(r"\b\w{4,}\b", original)
+        if w.lower() not in {
+            "that", "this", "with", "from", "have", "been", "will",
+            "your", "their", "were", "which", "than", "then", "when",
+        }
+    )
+    if original_words:
+        result_words   = set(w.lower() for w in re.findall(r"\b\w{4,}\b", result))
+        overlap_ratio  = len(original_words & result_words) / len(original_words)
+        if overlap_ratio < 0.05:
+            log.warning(f"[resume_rewriter] Low overlap: {overlap_ratio:.1%}")
+            return False
+
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — RESUME REWRITE  (original feature)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ACTION_VERBS = [
+    "developed", "implemented", "designed", "optimized", "optimised", "led",
+    "architected", "engineered", "built", "created", "delivered",
+    "automated", "launched", "maintained", "integrated", "deployed",
+    "reduced", "increased", "improved", "achieved", "streamlined",
+    "migrated", "refactored", "established", "coordinated", "spearheaded",
+    "configured", "orchestrated", "monitored", "tested", "documented",
+]
+
+_WEAK_VERBS = ["made", "did", "worked", "helped", "used", "got", "was", "were"]
+
+
+def rewrite_resume(
+    resume_text:     str,
+    job_description: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Rewrites a resume to be ATS-friendly and impactful.
+
+    Priority order:
+      1. LLM (Groq → OpenAI → Mistral via get_llm_completion) — personalised
+      2. Rule-based NLP fallback — only when ALL LLM backends fail
+
+    Returns:
+        { "optimized_resume": str, "improvements": List[str], "source": str }
+    """
+    jd_block = ""
+    if job_description and job_description.strip():
+        jd_block = f"\nJOB DESCRIPTION TO TAILOR TOWARD:\n{job_description.strip()}\n"
+
+    prompt = f"""You are an expert resume writer and career coach.
+Rewrite the ENTIRE resume below so it is ATS-friendly and highly impactful.
+
+STRICT GUIDELINES:
+1. Use strong past-tense action verbs to start EVERY bullet
+   (Developed, Implemented, Designed, Optimised, Led, Architected, Delivered, Automated)
+2. Quantify EVERY achievement with real or plausible metrics
+   (%, time saved, users served, revenue impact, latency reduction)
+3. Keep bullets concise — one strong impact per line
+4. Highlight technical skills clearly in a dedicated Skills section
+5. Ensure consistent ATS-friendly formatting (no tables, no columns, no icons)
+6. Preserve the candidate's real name, contact info, education, and dates exactly
+7. Do NOT invent new personal details — only improve phrasing and add plausible metrics
+8. Tailor language to the job description if one is provided
+{jd_block}
+ORIGINAL RESUME:
+{resume_text}
+
+Output ONLY the fully rewritten resume text.
+No explanations, no preamble, no markdown fences.
+"""
+
+    # ── Step 1: Try LLM ───────────────────────────────────────────────────────
+    optimized_resume = None
+    source = "llm"
+
+    try:
+        result = get_llm_completion(prompt, model="auto")
+        if result and _is_valid_rewrite(result, resume_text):
+            optimized_resume = result.strip()
+            log.info("[resume_rewriter] ✅ LLM rewrite succeeded and passed validation")
+        elif result:
+            log.warning(f"[resume_rewriter] LLM rewrite failed validation — using rule-based")
+        else:
+            log.warning("[resume_rewriter] LLM returned empty output")
+    except Exception as e:
+        log.warning(f"[resume_rewriter] LLM exception: {type(e).__name__}: {e}")
+
+    # ── Step 2: Rule-based NLP fallback ──────────────────────────────────────
+    if not optimized_resume:
+        log.warning("[resume_rewriter] All LLM backends failed — falling back to rule-based NLP")
+        source = "rule_based"
+        optimized_resume = _apply_rule_based_rewrite(resume_text)
+
+    return {
+        "optimized_resume": optimized_resume,
+        "improvements":     _extract_improvements(resume_text, optimized_resume),
+        "source":           source,
+    }
+
+
+def _extract_improvements(original: str, optimized: str) -> list:
+    """Detect which improvements were applied. Returns human-readable labels."""
+    improvements = []
+    orig_low = original.lower()
+    opti_low = optimized.lower()
+
+    orig_verb_count = sum(1 for v in _ACTION_VERBS if v in orig_low)
+    opti_verb_count = sum(1 for v in _ACTION_VERBS if v in opti_low)
+    if opti_verb_count > orig_verb_count:
+        improvements.append(f"Added {opti_verb_count - orig_verb_count} strong action verb(s)")
+
+    quant_re = r"\d+\s*%|\d+[kK]\+?|\d+\s*(users|clients|ms|seconds|requests|records)"
+    if re.search(quant_re, opti_low) and not re.search(quant_re, orig_low):
+        improvements.append("Added quantified achievements (%, users, latency, etc.)")
+    elif re.search(quant_re, opti_low):
+        improvements.append("Enhanced metric visibility across bullet points")
+
+    orig_weak = sum(1 for v in _WEAK_VERBS if re.search(r"\b" + v + r"\b", orig_low))
+    opti_weak = sum(1 for v in _WEAK_VERBS if re.search(r"\b" + v + r"\b", opti_low))
+    if opti_weak < orig_weak:
+        improvements.append(f"Replaced {orig_weak - opti_weak} weak verb(s) with impactful language")
+
+    orig_words = len(original.split())
+    opti_words = len(optimized.split())
+    if opti_words > orig_words * 1.1:
+        improvements.append("Expanded content with richer detail and context")
+    elif opti_words < orig_words * 0.85:
+        improvements.append("Tightened language for conciseness and clarity")
+
+    improvements.append("Improved ATS compatibility and keyword density")
+    improvements.append("Enhanced professional tone and formatting consistency")
+    return improvements
+
+
+def _apply_rule_based_rewrite(text: str) -> str:
+    """
+    Lightweight rule-based rewrite — ONLY used when ALL LLM backends fail.
+    """
+    improved = _improve_text_with_rules(text)
+
+    lines = improved.split("\n")
+    enhanced_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("•", "-", "*")) and not re.search(r"\d", stripped):
+            line = line.rstrip() + "  ← add a metric here (%, numbers, users)"
+        enhanced_lines.append(line)
+
+    improved = "\n".join(enhanced_lines)
+    improved += (
+        "\n\n─────────────────────────────────────────────────────────────\n"
+        "NOTE: This resume was enhanced using rule-based NLP because no\n"
+        "LLM API key is configured. For a fully personalised AI rewrite,\n"
+        "add GROQ_API_KEY, OPENAI_API_KEY, or MISTRAL_API_KEY to your .env\n"
+        "─────────────────────────────────────────────────────────────"
+    )
+    return improved
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — SKILL GAP ANALYSIS  (merged from skill_gap.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Pydantic schemas ──────────────────────────────────────────────────────────
+
+class SkillGapRequest(BaseModel):
+    resumeText: str   # matches aiApi.ts: suggestSkills sends { resumeText }
+
+class CertificationItem(BaseModel):
+    name:     str
+    provider: str
+    level:    str     # "Beginner" | "Intermediate" | "Advanced"
+
+class SkillGapResponse(BaseModel):
+    missing_technical: list[str]
+    trending:          list[str]
+    soft_skills:       list[str]
+    certifications:    list[CertificationItem]
+    role_gap_analysis: str
+    source:            str   # "llm" | "nlp_fallback" — consumed by frontend badge
+
+# ── Static corpora for NLP fallback ──────────────────────────────────────────
+
+_TECH_CORPUS = [
+    "Docker", "Kubernetes", "CI/CD", "Redis", "GraphQL", "Terraform",
+    "AWS", "Azure", "GCP", "Spring Boot", "FastAPI", "React", "TypeScript",
+    "PostgreSQL", "MongoDB", "Kafka", "Elasticsearch",
+    "Machine Learning", "Deep Learning", "PyTorch", "TensorFlow",
+    "LLM Fine-Tuning", "RAG", "LangChain", "Vector Databases",
+    "WebAssembly", "Rust", "Go", "Cybersecurity", "System Design",
+]
+
+_TRENDING = [
+    "LLM Fine-Tuning", "RAG", "LangChain", "Vector Databases",
+    "Kubernetes", "Terraform", "GraphQL", "Rust", "WebAssembly",
+]
+
+_SOFT_SKILLS = [
+    "Cross-functional Collaboration", "Technical Communication",
+    "Agile / Scrum", "Problem Decomposition", "Code Review", "Mentorship",
+    "Leadership", "Conflict Resolution", "Stakeholder Management",
+]
+
+_CERTS_DB = [
+    {"name": "AWS Certified Developer",       "provider": "Amazon Web Services", "level": "Intermediate"},
+    {"name": "Certified Kubernetes Admin",    "provider": "CNCF",                "level": "Advanced"},
+    {"name": "Google Cloud Professional",     "provider": "Google Cloud",        "level": "Advanced"},
+    {"name": "Certified Scrum Master",        "provider": "Scrum Alliance",      "level": "Beginner"},
+    {"name": "HashiCorp Terraform Associate", "provider": "HashiCorp",           "level": "Intermediate"},
+    {"name": "Microsoft Azure Fundamentals",  "provider": "Microsoft",           "level": "Beginner"},
+]
+
+# ── NLP fallback for skill gap ────────────────────────────────────────────────
+
+def _skill_gap_nlp_fallback(resume_text: str) -> dict:
+    """
+    Phase 1 NLP rule-based skill gap detection.
+    Uses SentenceTransformer cosine similarity to find skills absent from
+    the resume. Used ONLY when all LLM backends fail.
+    """
+    log.warning("[resume_rewriter] Skill gap: LLM failed — using NLP fallback.")
+
+    resume_emb  = embedder.encode(resume_text,  convert_to_tensor=True)
+    corpus_embs = embedder.encode(_TECH_CORPUS, convert_to_tensor=True)
+    scores  = util.cos_sim(resume_emb, corpus_embs)[0].tolist()
+    missing = [s for s, sc in zip(_TECH_CORPUS, scores) if sc < 0.25][:8]
+
+    resume_lower  = resume_text.lower()
+    trending_miss = [s for s in _TRENDING    if s.lower() not in resume_lower][:7]
+    soft_miss     = [s for s in _SOFT_SKILLS if s.lower() not in resume_lower][:6]
+
+    doc      = nlp(resume_text[:3000])
+    gap_text = (
+        f"Based on NLP analysis of your resume, key gaps include expertise in "
+        f"{', '.join(missing[:3]) if missing else 'cloud and AI technologies'}. "
+        f"Focusing on these alongside certifications in Kubernetes and AWS will "
+        f"significantly improve your ATS score and market competitiveness."
+    )
+
+    return {
+        "missing_technical": missing,
+        "trending":          trending_miss,
+        "soft_skills":       soft_miss,
+        "certifications":    _CERTS_DB[:3],
+        "role_gap_analysis": gap_text,
+        "source":            "nlp_fallback",
+    }
+
+# ── LLM prompt for skill gap ──────────────────────────────────────────────────
+
+def _build_skill_gap_prompt(resume_text: str) -> str:
+    return f"""You are an expert technical recruiter and career coach.
+Analyse the resume below and return a personalised skill gap report.
+
+RESUME:
+\"\"\"
+{resume_text[:4000]}
+\"\"\"
+
+Return ONLY a valid JSON object with exactly these keys (no markdown, no explanation):
+{{
+  "missing_technical": ["skill1", ...],
+  "trending":          ["skill1", ...],
+  "soft_skills":       ["skill1", ...],
+  "certifications": [
+    {{"name": "...", "provider": "...", "level": "Beginner|Intermediate|Advanced"}},
+    ...
+  ],
+  "role_gap_analysis": "..."
+}}
+
+Rules:
+- missing_technical : 5-8 technical skills ABSENT from this specific resume
+- trending          : 5-7 AI/cloud/DevOps skills relevant to THIS candidate's domain
+- soft_skills       : 4-6 soft skills this specific candidate should develop
+- certifications    : 2-4 certs matched to this resume's actual tech stack
+- role_gap_analysis : 3-5 sentences referencing technologies actually found in the resume
+- ALL output must be personalised to THIS resume — no generic boilerplate
+"""
+
+# ── FastAPI endpoint ──────────────────────────────────────────────────────────
+
+@router.post("/suggest-skills", response_model=SkillGapResponse)
+async def suggest_skills(req: SkillGapRequest):
+    """
+    Phase 2 Skill Gap Analysis endpoint.
+
+    Receives the resume's plain text (sent from localStorage["extracted_text"]
+    stored by the frontend after Phase 1 ATS analysis completes).
+
+    Strategy — mirrors rewrite_resume():
+      1. Try each Groq model in priority order (LLaMA-3-70B → 8B → Mistral)
+      2. Validate output with _is_valid_rewrite() — same validator as rewrite
+      3. On ALL LLM failures → NLP fallback (spaCy + SentenceTransformers)
+
+    Response always includes source: "llm" | "nlp_fallback".
+    """
+    resume_text = (req.resumeText or "").strip()
+    if not resume_text:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "resumeText is empty. "
+                "Please upload and analyse your resume from the Dashboard first."
+            ),
+        )
+
+    _REQUIRED_KEYS = {
+        "missing_technical", "trending", "soft_skills",
+        "certifications", "role_gap_analysis",
+    }
+
+    # ── LLM attempts ──────────────────────────────────────────────────────────
+    for model in LLM_MODELS:
+        try:
+            # Retry once on ConnectTimeout before moving to next model.
+            # This handles the common case where Groq is slow on first request
+            # (cold start / rate limit) but succeeds immediately on retry.
+            last_exc: Exception | None = None
+            response = None
+            for attempt in range(2):   # attempt 0 = first try, attempt 1 = retry
+                try:
+                    response = groq_client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are a JSON-only API. Return only valid JSON, no markdown.",
+                            },
+                            {
+                                "role": "user",
+                                "content": _build_skill_gap_prompt(resume_text),
+                            },
+                        ],
+                        temperature=0.4,
+                        max_tokens=1200,
+                    )
+                    break   # success — exit retry loop
+                except Exception as _retry_exc:
+                    last_exc = _retry_exc
+                    exc_name = type(_retry_exc).__name__
+                    log.warning(f"[resume_rewriter] {model} attempt {attempt+1}/2 failed: {exc_name}")
+                    if attempt == 0:
+                        await asyncio.sleep(2)   # non-blocking pause before retry
+                    continue
+
+            if response is None:
+                raise last_exc or Exception("No response after retries")
+
+            raw = response.choices[0].message.content.strip()
+
+            # Strip markdown fences if model adds them despite instructions
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+            # Reuse shared validator (min_len=50 for JSON)
+            if not _is_valid_rewrite(raw, resume_text, min_len=50):
+                log.warning(f"[resume_rewriter] {model} skill gap output failed validation")
+                continue
+
+            parsed: dict = json.loads(raw)
+
+            if not _REQUIRED_KEYS.issubset(parsed.keys()):
+                log.warning(f"[resume_rewriter] {model} missing keys: {_REQUIRED_KEYS - parsed.keys()}")
+                continue
+
+            log.info(f"[resume_rewriter] ✅ Skill gap LLM ({model}) succeeded.")
+
+            return SkillGapResponse(
+                missing_technical = parsed["missing_technical"],
+                trending          = parsed["trending"],
+                soft_skills       = parsed["soft_skills"],
+                certifications    = [CertificationItem(**c) for c in parsed["certifications"]],
+                role_gap_analysis = parsed["role_gap_analysis"],
+                source            = "llm",
+            )
+
+        except Exception as e:
+            log.warning(f"[resume_rewriter] {model} skill gap failed: {type(e).__name__}: {e}")
+            continue
+
+    # ── NLP fallback (all LLMs failed) ───────────────────────────────────────
+    log.warning(
+        "[resume_rewriter] ⚠️  All LLM backends failed for suggest-skills. "
+        "Using NLP rule-based fallback. source=nlp_fallback will be set in response."
+    )
+    fallback = _skill_gap_nlp_fallback(resume_text)
+    return SkillGapResponse(**fallback)
+
+text_extractor.py:
+"""
+text_extractor.py
+─────────────────
+Extracts plain text from PDF and DOCX resume files.
+
+Fixes applied vs original:
+  - DOCX table cell text was appended with no spacing, causing words to merge.
+    Each cell now appended with a space separator before newline.
+  - Added explicit encoding fallback for PDFs with non-UTF-8 characters.
+  - Added file extension check that is case-insensitive (.PDF / .DOCX).
+  - Empty-page guard prevents blank pages from adding whitespace-only lines.
+"""
+
+import io
+from typing import Union
+
+import PyPDF2
+from docx import Document
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PDF
+# ──────────────────────────────────────────────────────────────────────────────
+
+def extract_text_from_pdf(content: bytes) -> str:
+    """Extract text from raw PDF bytes using PyPDF2."""
+    try:
+        pdf_file   = io.BytesIO(content)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+
+        pages = []
+        for page in pdf_reader.pages:
+            page_text = page.extract_text()
+            if page_text and page_text.strip():          # ✅ skip blank pages
+                pages.append(page_text.strip())
+
+        return "\n".join(pages)
+
+    except Exception as e:
+        raise Exception(f"PDF extraction failed: {str(e)}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DOCX
+# ──────────────────────────────────────────────────────────────────────────────
+
+def extract_text_from_docx(content: bytes) -> str:
+    """Extract text from raw DOCX bytes using python-docx."""
+    try:
+        docx_file = io.BytesIO(content)
+        doc       = Document(docx_file)
+
+        lines = []
+
+        # Body paragraphs
+        for para in doc.paragraphs:
+            if para.text and para.text.strip():
+                lines.append(para.text.strip())
+
+        # Table cells — ✅ fix: was missing space between cells, words merged
+        for table in doc.tables:
+            for row in table.rows:
+                row_parts = []
+                for cell in row.cells:
+                    if cell.text and cell.text.strip():
+                        row_parts.append(cell.text.strip())
+                if row_parts:
+                    lines.append("  ".join(row_parts))
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        raise Exception(f"DOCX extraction failed: {str(e)}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dispatcher
+# ──────────────────────────────────────────────────────────────────────────────
+
+def extract_text_from_file(content: bytes, filename: str) -> str:
+    """
+    Dispatch to the appropriate extractor based on file extension.
+    Extension check is case-insensitive so .PDF and .DOCX also work.
+    """
+    if not filename:
+        raise ValueError("Filename is required to determine file type")
+
+    lower = filename.lower()
+
+    if lower.endswith(".pdf"):
+        return extract_text_from_pdf(content)
+    elif lower.endswith(".docx"):
+        return extract_text_from_docx(content)
+    else:
+        raise ValueError(
+            f"Unsupported file format: '{filename}'. "
+            "Only PDF and DOCX files are accepted."
+        )
+
+config.py:
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Settings:
+    APP_NAME: str = "AI Resume Screening System"
+    VERSION: str  = "2.0"
+    HOST: str     = "0.0.0.0"
+    PORT: int     = 8000
+
+    # ── Optional LLM API keys (leave blank to use local fallback) ──────────
+    OPENAI_API_KEY: str  = os.getenv("OPENAI_API_KEY",  "")
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+
+    # ── LLM backend: "gpt" | "mistral" | "local" ───────────────────────────
+    DEFAULT_LLM: str = os.getenv("DEFAULT_LLM", "local")
+
+    # ── ATS scoring ─────────────────────────────────────────────────────────
+    ATS_THRESHOLD: int = 70
+
+    # ── NLP models ──────────────────────────────────────────────────────────
+    SPACY_MODEL: str                = "en_core_web_sm"
+    SENTENCE_TRANSFORMER_MODEL: str = "all-MiniLM-L6-v2"
+
+    # ── File upload limits ───────────────────────────────────────────────────
+    MAX_FILE_SIZE_MB: int           = 10
+    SUPPORTED_FILE_TYPES: list      = [".pdf", ".docx"]
+
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    CORS_ORIGINS: list = [
+        "http://localhost:3000",   # React frontend
+        "http://localhost:8080",   # Spring Boot backend
+    ]
+
+
+settings = Settings()
+
+main.py:
+"""
+main.py
+────────
+FastAPI application — AI Resume Screening System  v2.0
+
+FIX-DOTENV-PATH:
+  The .env file lives at  ai_service/services/.env
+  but main.py is at       ai_service/main.py
+  Plain load_dotenv() only searches CWD (ai_service/) so it never finds
+  the file inside services/.  Fixed by explicitly loading from both locations
+  in priority order:
+    1. ai_service/services/.env   ← where your file actually is
+    2. ai_service/.env            ← standard fallback
+  Both are loaded with override=True so whichever has a key wins.
+
+FIX-LLM-PRIORITY:
+  - /suggest-skills, /project-summary, /jd-suggestions now call get_llm_completion()
+    with model="auto" so Groq → OpenAI → Mistral are all tried before any
+    rule-based fallback.
+  - _has_any_llm_key() strips whitespace before truthiness check.
+
+Original fixes preserved:
+  BUG-1  : POST /analyze-file route confirmed correct.
+  BUG-2  : MAX_FILE_SIZE_MB check before reading content.
+  BUG-3  : 400 returned for unsupported file types.
+  BUG-4  : lifespan context manager pattern (FastAPI 0.104+).
+  BUG-5  : /ai/advanced-parse kept for backwards compatibility.
+  DATA   : Name populated from fixed extract_profile().
+  NEW-1  : /suggest-skills endpoint.
+  NEW-2  : /project-summary endpoint.
+  NEW-3  : /jd-suggestions endpoint.
+  FIX-PY311 : No backslashes inside f-string {} expressions.
+  FIX-JSON  : expect_json=True used so GPT-2/rule-based output is safely
+              coerced into valid JSON before _parse_llm_json() is called.
+"""
+
+import json
+import os
+import logging
+import re as _re
+from contextlib import asynccontextmanager
+from typing import Optional, List, Dict, Any
+from pathlib import Path
+
+# ── FIX-DOTENV-PATH: load .env from its actual location ──────────────────────
+# Must happen before ANY other import that might call os.getenv().
+logging.basicConfig(level=logging.INFO, format="%(levelname)s │ %(name)s │ %(message)s")
+_log_early = logging.getLogger("ai_service")
+
+def _load_env_files():
+    """
+    Load .env from every candidate location, most-specific first.
+
+    Your project layout:
+        ai_service/
+            main.py          ← this file
+            services/
+                .env          ← where your keys actually live
+                llm_client.py
+                ...
+
+    load_dotenv() with no arguments only searches CWD.
+    When you run `python main.py` from ai_service/, CWD = ai_service/,
+    so services/.env is never found and all os.getenv() calls return None.
+
+    We fix this by building the path explicitly from __file__.
+    """
+    from dotenv import load_dotenv
+
+    this_dir     = Path(__file__).parent.resolve()        # ai_service/
+    services_env = this_dir / "services" / ".env"         # ai_service/services/.env
+    root_env     = this_dir / ".env"                      # ai_service/.env
+
+    loaded_any = False
+    for env_path in [services_env, root_env]:
+        if env_path.exists():
+            load_dotenv(str(env_path), override=True)
+            _log_early.info(f"✅ Loaded .env from: {env_path}")
+            loaded_any = True
+        else:
+            _log_early.debug(f"   .env not found at: {env_path} (skipping)")
+
+    if not loaded_any:
+        _log_early.warning(
+            "⚠️  No .env file found in ai_service/ or ai_service/services/\n"
+            "     Create ai_service/services/.env with your API keys:\n"
+            "       GROQ_API_KEY=gsk_...\n"
+            "       MISTRAL_API_KEY=..."
+        )
+
+_load_env_files()
+# ─────────────────────────────────────────────────────────────────────────────
+
+import uvicorn
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from config import settings
+from services.text_extractor import extract_text_from_file
+from services.advanced_resume_ai import advanced_parse_resume
+from services.resume_rewriter import rewrite_resume
+from services.project_enhancer import enhance_projects
+from services.jd_tailor import tailor_resume_to_jd
+from services.llm_client import get_llm_completion
+from services.hr_shortlisting import (
+    rank_candidates,
+    cluster_candidates,
+    auto_shortlist_by_threshold,
+    generate_hr_insights,
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+log = logging.getLogger("ai_service")
+
+MAX_BYTES = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _has_any_llm_key() -> bool:
+    """
+    Return True if at least one real LLM API key is configured.
+    .strip() guards against `GROQ_API_KEY= ` (space after =) in .env.
+    """
+    groq    = (os.getenv("GROQ_API_KEY")    or "").strip()
+    openai  = (os.getenv("OPENAI_API_KEY")  or "").strip()
+    mistral = (os.getenv("MISTRAL_API_KEY") or "").strip()
+    return bool(groq or openai or mistral)
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Strip markdown fences and parse JSON from LLM output."""
+    cleaned = _re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
+    return json.loads(cleaned)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIFESPAN
+# ══════════════════════════════════════════════════════════════════════════════
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Warm up heavy models at startup so first request is not slow."""
+    log.info("━━━ AI Service starting ━━━")
+
+    # Print each key's status so issues are immediately obvious in the log
+    groq_key    = (os.getenv("GROQ_API_KEY")    or "").strip()
+    openai_key  = (os.getenv("OPENAI_API_KEY")  or "").strip()
+    mistral_key = (os.getenv("MISTRAL_API_KEY") or "").strip()
+
+    log.info(f"  GROQ_API_KEY    : {'✅ set (' + groq_key[:8] + '...)' if groq_key    else '❌ NOT SET'}")
+    log.info(f"  OPENAI_API_KEY  : {'✅ set (' + openai_key[:8] + '...)' if openai_key  else '❌ NOT SET'}")
+    log.info(f"  MISTRAL_API_KEY : {'✅ set (' + mistral_key[:8] + '...)' if mistral_key else '❌ NOT SET'}")
+
+    if not _has_any_llm_key():
+        log.warning(
+            "⚠️  NO LLM API KEYS FOUND — all AI endpoints will use rule-based fallback.\n"
+            "     Keys must be in ai_service/services/.env  OR  ai_service/.env"
+        )
+
+    try:
+        from services.jd_tailor import _get_sentence_model
+        model = _get_sentence_model()
+        if model:
+            log.info("✅ SentenceTransformer loaded")
+        else:
+            log.warning("⚠️  SentenceTransformer unavailable — keyword fallback active")
+    except Exception as e:
+        log.warning(f"⚠️  Model warmup failed: {e}")
+
+    from services.llm_client import get_active_backends
+    backends = get_active_backends()
+    active = [k for k, v in backends.items() if v]
+    log.info(f"✅ LLM backends available: {', '.join(active)}")
+    log.info("✅ AI Service ready at http://0.0.0.0:8000")
+    yield
+    log.info("━━━ AI Service shutting down ━━━")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# APP
+# ══════════════════════════════════════════════════════════════════════════════
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.VERSION,
+    description="AI-powered resume analysis, enhancement, and HR automation API",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PYDANTIC MODELS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RewriteRequest(BaseModel):
+    resumeText:     str
+    jobDescription: Optional[str] = None
+
+
+class ProjectEnhanceRequest(BaseModel):
+    projects: List[str] = Field(..., min_items=1)
+
+
+class JDTailorRequest(BaseModel):
+    resumeText:     str
+    jobDescription: str
+
+
+class HRRankRequest(BaseModel):
+    candidates: List[Dict[str, Any]]
+
+
+class HRClusterRequest(BaseModel):
+    candidates: List[Dict[str, Any]]
+    n_clusters: Optional[int] = Field(default=3, ge=1, le=10)
+
+
+class HRShortlistRequest(BaseModel):
+    candidates: List[Dict[str, Any]]
+    threshold:  Optional[int] = Field(default=70, ge=0, le=100)
+
+
+class SkillSuggestRequest(BaseModel):
+    resumeText: str = ""
+
+
+class ProjectSummaryRequest(BaseModel):
+    title:     str
+    techStack: str
+
+
+class JDSuggestionsRequest(BaseModel):
+    resumeText:     str = ""
+    jobDescription: str
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HEALTH CHECK
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/", tags=["Health"])
+async def root():
+    from services.llm_client import get_active_backends
+    return {
+        "message":  f"{settings.APP_NAME} v{settings.VERSION}",
+        "status":   "running",
+        "docs":     "http://localhost:8000/docs",
+        "backends": get_active_backends(),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — ANALYSE FILE
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/analyze-file", tags=["Phase 1"])
+async def analyze_file(file: UploadFile = File(...)):
+    """
+    Upload a resume (PDF or DOCX) and receive ATS analysis.
+
+    Returns:
+        ats_score, recommended_role, matched_keywords, explanation,
+        ai_data (profile, education, skills), extracted_text
+    """
+    filename = file.filename or ""
+    if not (filename.lower().endswith(".pdf") or filename.lower().endswith(".docx")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: '{filename}'. Only PDF and DOCX are accepted.",
+        )
+
+    content = await file.read()
+
+    if len(content) > MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is {settings.MAX_FILE_SIZE_MB} MB.",
+        )
+
+    try:
+        text = extract_text_from_file(content, filename)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Text extraction failed: {str(e)}")
+
+    if not text or len(text.strip()) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Resume appears to be empty or could not be read. Please try a different file.",
+        )
+
+    try:
+        result = advanced_parse_resume(text)
+    except Exception as e:
+        log.error(f"ATS analysis error: {e}")
+        raise HTTPException(status_code=500, detail=f"ATS analysis failed: {str(e)}")
+
+    log.info(
+        f"✅ Analyzed '{filename}' — ATS: {result['ats']['ats_score']} "
+        f"Role: {result['ats']['recommended_role']} "
+        f"Skills: {len(result['ai_data']['skills'])}"
+    )
+
+    return {
+        "ats_score":        result["ats"]["ats_score"],
+        "recommended_role": result["ats"]["recommended_role"],
+        "matched_keywords": result["ai_data"]["skills"],
+        "explanation":      result["ats"]["feedback"],
+        "ai_data":          result["ai_data"],
+        "extracted_text":   text,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — AI ENHANCEMENT (existing endpoints)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/rewrite", tags=["Phase 2"])
+async def rewrite_endpoint(request: RewriteRequest):
+    """
+    Rewrite a resume to be ATS-optimised and impactful.
+    LLM priority: Groq → OpenAI → Mistral → rule-based (last resort).
+    """
+    if not request.resumeText.strip():
+        raise HTTPException(status_code=400, detail="resumeText must not be empty")
+    try:
+        return rewrite_resume(request.resumeText, request.jobDescription)
+    except Exception as e:
+        log.error(f"Rewrite error: {e}")
+        raise HTTPException(status_code=500, detail=f"Rewrite failed: {str(e)}")
+
+
+@app.post("/project-enhance", tags=["Phase 2"])
+async def project_enhance_endpoint(request: ProjectEnhanceRequest):
+    """Transform plain project descriptions into quantified bullet points."""
+    non_empty = [p for p in request.projects if p and p.strip()]
+    if not non_empty:
+        raise HTTPException(status_code=400, detail="At least one non-empty project is required")
+    try:
+        return enhance_projects(non_empty)
+    except Exception as e:
+        log.error(f"Project enhance error: {e}")
+        raise HTTPException(status_code=500, detail=f"Project enhancement failed: {str(e)}")
+
+
+@app.post("/jd-tailor", tags=["Phase 2"])
+async def jd_tailor_endpoint(request: JDTailorRequest):
+    """Tailor a resume to a specific job description with semantic match score."""
+    if not request.resumeText.strip():
+        raise HTTPException(status_code=400, detail="resumeText must not be empty")
+    if not request.jobDescription.strip():
+        raise HTTPException(status_code=400, detail="jobDescription must not be empty")
+    try:
+        return tailor_resume_to_jd(request.resumeText, request.jobDescription)
+    except Exception as e:
+        log.error(f"JD tailor error: {e}")
+        raise HTTPException(status_code=500, detail=f"JD tailoring failed: {str(e)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — NEW ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/suggest-skills", tags=["Phase 2"])
+async def suggest_skills_endpoint(request: SkillSuggestRequest):
+    """
+    Suggest missing / trending skills and certifications.
+    LLM priority: Groq → OpenAI → Mistral → rule-based.
+    """
+    resume_text = request.resumeText.strip()
+
+    if resume_text:
+        task_line    = "Analyse the resume below and suggest skills to improve it."
+        resume_block = "RESUME TEXT:\n" + resume_text + "\n\n"
+    else:
+        task_line    = "Suggest the most in-demand skills for software engineers in 2025."
+        resume_block = ""
+
+    prompt = f"""You are an expert career coach and technical recruiter.
+{task_line}
+
+{resume_block}Return a JSON object with EXACTLY these keys (no markdown, no backticks, plain JSON only):
+{{
+  "missing_technical": ["list of 5-8 missing/recommended technical skills"],
+  "trending": ["list of 5-7 trending skills in 2025 (e.g. LLM Fine-Tuning, RAG, LangChain, Vector Databases, Kubernetes, Terraform, GitHub Actions, GraphQL)"],
+  "soft_skills": ["list of 4-6 professional/soft skills (e.g. Cross-functional Collaboration, Technical Communication, Agile / Scrum, Problem Decomposition, Code Review, Mentorship)"],
+  "certifications": [
+    {{"name": "certification name", "provider": "provider name", "level": "Beginner/Intermediate/Advanced"}}
+  ],
+  "role_gap_analysis": "2-3 sentence analysis of skill gaps and recommendations"
+}}
+
+Return ONLY valid JSON. No explanation, no markdown fences."""
+
+    if _has_any_llm_key():
+        try:
+            raw    = get_llm_completion(prompt, model="auto", expect_json=True)
+            result = _parse_llm_json(raw)
+            for key in ["missing_technical", "trending", "soft_skills", "certifications", "role_gap_analysis"]:
+                if key not in result:
+                    raise ValueError(f"Missing key: {key}")
+            log.info("✅ suggest-skills: LLM response used")
+            return result
+        except Exception as e:
+            log.warning(f"suggest-skills LLM failed ({e}), using rule-based fallback")
+    else:
+        log.warning(
+            "suggest-skills: No LLM API key found (GROQ_API_KEY / OPENAI_API_KEY / MISTRAL_API_KEY). "
+            "Using rule-based fallback. Add a key to .env for AI-powered suggestions."
+        )
+
+    return _rule_based_skill_suggestions(resume_text)
+
+
+def _rule_based_skill_suggestions(resume_text: str) -> Dict[str, Any]:
+    """Deterministic skill suggestions when LLM is unavailable."""
+    from services.advanced_resume_ai import extract_skills
+
+    existing = set(s.lower() for s in extract_skills(resume_text)) if resume_text else set()
+
+    all_missing_tech = [
+        "Docker", "Kubernetes", "CI/CD Pipelines", "Redis", "System Design",
+        "REST API Design", "OAuth2 / JWT", "Cloud Deployment (AWS/GCP/Azure)",
+        "GraphQL", "Terraform", "GitHub Actions", "Elasticsearch",
+    ]
+    missing = [s for s in all_missing_tech if s.lower() not in existing][:8]
+
+    gap_analysis = (
+        f"Resume detected {len(existing)} skills. Focus on adding cloud/DevOps skills and "
+        "modern AI/ML tooling to significantly improve your ATS score and role match."
+        if resume_text else
+        "No resume provided — showing the most in-demand skills for software engineers in 2025."
+    )
+
+    return {
+        "missing_technical": missing,
+        "trending": [
+            "LLM Fine-Tuning", "RAG (Retrieval-Augmented Generation)", "LangChain",
+            "Vector Databases", "Kubernetes", "Terraform", "GitHub Actions", "GraphQL",
+        ],
+        "soft_skills": [
+            "Cross-functional Collaboration", "Technical Communication",
+            "Agile / Scrum", "Problem Decomposition", "Code Review", "Mentorship",
+        ],
+        "certifications": [
+            {"name": "AWS Certified Developer – Associate", "provider": "Amazon",    "level": "Intermediate"},
+            {"name": "HashiCorp Terraform Associate",       "provider": "HashiCorp", "level": "Intermediate"},
+            {"name": "Certified Kubernetes Administrator (CKA)", "provider": "CNCF", "level": "Advanced"},
+            {"name": "Google Professional Cloud Developer", "provider": "Google",    "level": "Intermediate"},
+        ],
+        "role_gap_analysis": gap_analysis,
+    }
+
+
+@app.post("/project-summary", tags=["Phase 2"])
+async def project_summary_endpoint(request: ProjectSummaryRequest):
+    """Generate a professional project summary. Returns: one_liner, full_summary, highlights, impact_metrics"""
+    if not request.title.strip():
+        raise HTTPException(status_code=400, detail="title must not be empty")
+    if not request.techStack.strip():
+        raise HTTPException(status_code=400, detail="techStack must not be empty")
+
+    title      = request.title.strip()
+    tech_stack = request.techStack.strip()
+
+    prompt = f"""You are an expert resume writer. Generate a professional project summary for a resume.
+
+PROJECT TITLE: {title}
+TECH STACK: {tech_stack}
+
+Return a JSON object with EXACTLY these keys (no markdown, no backticks, plain JSON only):
+{{
+  "one_liner": "• [Action Verb] {title} using {tech_stack}, delivering [quantified impact]. (1 line, ATS bullet format)",
+  "full_summary": "2-3 sentence professional summary of the project, what it does, tech used, and impact",
+  "highlights": [
+    "Key highlight 1 (technical achievement)",
+    "Key highlight 2 (feature or integration)",
+    "Key highlight 3 (performance or scale)"
+  ],
+  "impact_metrics": [
+    "Reduced API latency by 35%",
+    "Serving 10,000+ daily requests",
+    "Zero-downtime deployments"
+  ]
+}}
+
+Return ONLY valid JSON. No explanation, no markdown fences."""
+
+    if _has_any_llm_key():
+        try:
+            raw    = get_llm_completion(prompt, model="auto", expect_json=True)
+            result = _parse_llm_json(raw)
+            for key in ["one_liner", "full_summary", "highlights", "impact_metrics"]:
+                if key not in result:
+                    raise ValueError(f"Missing key: {key}")
+            log.info("✅ project-summary: LLM response used")
+            return result
+        except Exception as e:
+            log.warning(f"project-summary LLM failed ({e}), using rule-based fallback")
+    else:
+        log.warning("project-summary: No LLM API key found. Using rule-based fallback.")
+
+    return _rule_based_project_summary(title, tech_stack)
+
+
+def _rule_based_project_summary(title: str, tech_stack: str) -> Dict[str, Any]:
+    return {
+        "one_liner": (
+            f"• Designed {title.upper()} using {tech_stack}, delivering a "
+            "production-ready solution with measurable performance improvements."
+        ),
+        "full_summary": (
+            f"Developed {title} using {tech_stack}. "
+            "The system provides scalable, high-performance functionality with a clean architecture. "
+            "Implemented best practices including automated testing, CI/CD pipelines, and cloud deployment."
+        ),
+        "highlights": [
+            "Implemented RESTful APIs with Spring Boot and OpenAPI docs",
+            "Configured JPA/Hibernate with lazy loading for efficiency",
+            "Achieved 85%+ unit and integration test coverage with JUnit 5",
+        ],
+        "impact_metrics": [
+            "Reduced API latency by 35%",
+            "Serving 10,000+ daily requests",
+            "Zero-downtime deployments",
+        ],
+    }
+
+
+@app.post("/jd-suggestions", tags=["Phase 2"])
+async def jd_suggestions_endpoint(request: JDSuggestionsRequest):
+    """Analyse a JD and suggest skills, projects, and keywords to match it."""
+    if not request.jobDescription.strip():
+        raise HTTPException(status_code=400, detail="jobDescription must not be empty")
+
+    jd     = request.jobDescription.strip()
+    resume = request.resumeText.strip()
+    resume_section = ("CURRENT RESUME:\n" + resume + "\n\n") if resume else ""
+
+    prompt = f"""You are an expert resume coach. Analyse the job description below and suggest what to add to a resume.
+
+JOB DESCRIPTION:
+{jd}
+
+{resume_section}Return a JSON object with EXACTLY these keys (no markdown, no backticks, plain JSON only):
+{{
+  "skills_to_add": ["list of 8-10 specific skills from the JD the resume should include"],
+  "projects_to_add": [
+    {{
+      "title": "Project title that demonstrates JD requirements",
+      "description": "1-2 sentence description of what to build and why it fits the JD",
+      "tech_stack": ["list", "of", "technologies"]
+    }}
+  ],
+  "keywords_to_include": ["list of 8-12 ATS keywords from the JD to weave into resume bullets"],
+  "action_plan": [
+    "Step 1: specific action to take",
+    "Step 2: specific action to take",
+    "Step 3: specific action to take",
+    "Step 4: specific action to take",
+    "Step 5: specific action to take"
+  ]
+}}
+
+Provide 2-3 project ideas. Return ONLY valid JSON. No explanation, no markdown fences."""
+
+    if _has_any_llm_key():
+        try:
+            raw    = get_llm_completion(prompt, model="auto", expect_json=True)
+            result = _parse_llm_json(raw)
+            for key in ["skills_to_add", "projects_to_add", "keywords_to_include", "action_plan"]:
+                if key not in result:
+                    raise ValueError(f"Missing key: {key}")
+            log.info("✅ jd-suggestions: LLM response used")
+            return result
+        except Exception as e:
+            log.warning(f"jd-suggestions LLM failed ({e}), using rule-based fallback")
+    else:
+        log.warning("jd-suggestions: No LLM API key found. Using rule-based fallback.")
+
+    return _rule_based_jd_suggestions(jd)
+
+
+def _rule_based_jd_suggestions(jd: str) -> Dict[str, Any]:
+    from services.jd_tailor import _extract_jd_keywords
+
+    jd_lower    = jd.lower()
+    jd_keywords = _extract_jd_keywords(jd)
+
+    is_java      = any(w in jd_lower for w in ["java", "spring", "spring boot"])
+    is_react     = any(w in jd_lower for w in ["react", "frontend", "typescript"])
+    is_fullstack = is_java and is_react
+    is_python    = any(w in jd_lower for w in ["python", "django", "fastapi"])
+    is_cloud     = any(w in jd_lower for w in ["aws", "azure", "gcp", "cloud"])
+    is_devops    = any(w in jd_lower for w in ["docker", "kubernetes", "ci/cd"])
+
+    skills_raw: List[str] = []
+    if is_java:   skills_raw += ["Java", "Spring Boot", "Spring MVC", "Hibernate"]
+    if is_react:  skills_raw += ["React", "TypeScript", "Redux"]
+    if is_python: skills_raw += ["Python", "FastAPI", "Django"]
+    if is_cloud:  skills_raw += ["AWS", "Cloud Deployment"]
+    if is_devops: skills_raw += ["Docker", "Kubernetes", "CI/CD"]
+    skills_raw += ["REST API", "MySQL", "PostgreSQL", "Git"]
+
+    seen: set = set()
+    skills: List[str] = []
+    for s in skills_raw:
+        if s not in seen:
+            seen.add(s)
+            skills.append(s)
+
+    tech_1 = ["Spring Boot", "Kafka", "Docker", "PostgreSQL", "API Gateway"] if is_java else ["React", "Node.js", "Redis", "MySQL"]
+    tech_2 = ["Spring Boot", "WebSocket", "Redis", "React", "MySQL"] if is_fullstack else ["Python", "FastAPI", "PostgreSQL", "Docker"]
+
+    keywords = jd_keywords[:12] if jd_keywords else [
+        "experience", "develop", "maintain", "scalable", "microservices",
+        "agile", "REST", "API", "database", "cloud", "testing", "deploy",
+    ]
+
+    return {
+        "skills_to_add":       skills[:10],
+        "projects_to_add": [
+            {
+                "title": "Microservices Order Management System",
+                "description": "Distributed order processing with Spring Boot microservices, API gateway, and Kafka.",
+                "tech_stack": tech_1,
+            },
+            {
+                "title": "Real-Time Inventory Tracker",
+                "description": "Live inventory dashboard using WebSocket, Redis caching, and a React frontend.",
+                "tech_stack": tech_2,
+            },
+        ],
+        "keywords_to_include": keywords,
+        "action_plan": [
+            f"Add missing skills to your Skills section: {', '.join(skills[:3])}",
+            "Build 'Microservices Order Management System' — it directly matches this JD",
+            f"Weave these keywords into your bullets: {', '.join(keywords[:4])}",
+            "Reorder your Skills section to mirror the JD's technology priority",
+            "Tailor your summary/objective to reflect this job's title and requirements",
+        ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HR AI ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/hr/rank", tags=["HR"])
+async def hr_rank_endpoint(request: HRRankRequest):
+    if not request.candidates:
+        raise HTTPException(status_code=400, detail="candidates list must not be empty")
+    try:
+        return {"ranked_candidates": rank_candidates(request.candidates)}
+    except Exception as e:
+        log.error(f"HR rank error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ranking failed: {str(e)}")
+
+
+@app.post("/hr/cluster", tags=["HR"])
+async def hr_cluster_endpoint(request: HRClusterRequest):
+    if not request.candidates:
+        raise HTTPException(status_code=400, detail="candidates list must not be empty")
+    try:
+        return cluster_candidates(request.candidates, request.n_clusters or 3)
+    except Exception as e:
+        log.error(f"HR cluster error: {e}")
+        raise HTTPException(status_code=500, detail=f"Clustering failed: {str(e)}")
+
+
+@app.post("/hr/auto-shortlist", tags=["HR"])
+async def hr_auto_shortlist_endpoint(request: HRShortlistRequest):
+    if not request.candidates:
+        raise HTTPException(status_code=400, detail="candidates list must not be empty")
+    try:
+        return auto_shortlist_by_threshold(request.candidates, request.threshold or 70)
+    except Exception as e:
+        log.error(f"HR shortlist error: {e}")
+        raise HTTPException(status_code=500, detail=f"Auto-shortlisting failed: {str(e)}")
+
+
+@app.post("/hr/insights", tags=["HR"])
+async def hr_insights_endpoint(request: HRRankRequest):
+    if not request.candidates:
+        raise HTTPException(status_code=400, detail="candidates list must not be empty")
+    try:
+        return generate_hr_insights(request.candidates)
+    except Exception as e:
+        log.error(f"HR insights error: {e}")
+        raise HTTPException(status_code=500, detail=f"Insights generation failed: {str(e)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADVANCED PARSE (legacy / dev endpoint)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/ai/advanced-parse", tags=["Dev"])
+async def advanced_parse(file: UploadFile = File(...)):
+    filename = file.filename or ""
+    content  = await file.read()
+    try:
+        text      = extract_text_from_file(content, filename)
+        ai_result = advanced_parse_resume(text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "raw_text":      text,
+        "ai_structured": ai_result,
+        "model":         "PURE_AI_ENGINE_V3",
+        "level":         "ADVANCED_AI",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=True,
+        log_level="info",
+    )
+
+requirements.txt:
+# ─── Web Framework ────────────────────────────────────────────────────────────
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6       # required for UploadFile / File(...)
+python-dotenv==1.0.0
+pydantic==2.5.0
+
+# ─── Document Extraction ──────────────────────────────────────────────────────
+PyPDF2==3.0.1
+python-docx==1.1.0
+
+# ─── NLP ──────────────────────────────────────────────────────────────────────
+spacy==3.7.2
+# After install run: python -m spacy download en_core_web_sm
+nltk==3.8.1
+
+# ─── AI / ML ──────────────────────────────────────────────────────────────────
+sentence-transformers==2.2.2  # semantic similarity for JD matching
+scikit-learn==1.3.2           # KMeans clustering
+pandas==2.1.3
+numpy==1.26.2
+
+# ─── LLM (optional — local fallback works without these) ──────────────────────
+# transformers and torch are large; keep if you want GPT-2 local inference
+transformers==4.35.2
+torch==2.1.1
+
+# ─── Optional API-based LLMs ──────────────────────────────────────────────────
+openai==1.3.5                 # only used if OPENAI_API_KEY is set
+requests==2.31.0              # only used if MISTRAL_API_KEY is set
+
+# NOTE: language-tool-python removed — it requires a running Java JRE and
+# causes startup failures in most environments. Grammar fixing is now done
+# with a lightweight pure-Python rule-based approach instead.
+
+test_api.py:
+"""
+test_api.py
+───────────
+End-to-end API test suite for the AI Resume Screening System.
+Run with:  python test_api.py
+
+Fixed vs original (tset_api.py):
+  - Renamed tset_api.py → test_api.py (typo)
+  - Added test_hr_cluster() and test_hr_insights() (were missing)
+  - Added test_suggest_skills(), test_project_summary(), test_jd_suggestions()
+  - Increased TIMEOUT from 30s to 60s — Groq/Mistral can take up to 45s on
+    first call; 30s caused false-negative timeouts for valid LLM responses
+  - Added timeout to all requests so tests don't hang forever
+  - Added per-test timing so you can see which endpoints are slow
+  - Added LLM backend check at startup so you know which backends are active
+"""
+
+import time
+import json
+import requests
+
+BASE_URL = "http://localhost:8000"
+TIMEOUT  = 60   # seconds per request — increased from 30 to handle LLM latency
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _ok(label: str, data=None):
+    print(f"  ✅ {label}")
+    if data:
+        preview = json.dumps(data, indent=None)
+        print(f"     {preview[:300]}")
+
+
+def _fail(label: str, err):
+    print(f"  ❌ {label}: {err}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_health_check() -> bool:
+    print("\n1. Health Check")
+    try:
+        r = requests.get(f"{BASE_URL}/", timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        backends = data.get("backends", {})
+        active = [k for k, v in backends.items() if v]
+        _ok(f"Running — active backends: {', '.join(active)}", data)
+        return True
+    except Exception as e:
+        _fail("Health check failed", e)
+        return False
+
+
+def test_rewrite() -> bool:
+    print("\n2. Resume Rewrite  POST /rewrite")
+    try:
+        data = {
+            "resumeText": (
+                "I am a software developer with 2 years of experience in Java and Python. "
+                "I made a web application using Spring Boot. "
+                "I helped the team with code reviews and fixed many bugs. "
+                "I worked on a REST API project and used MySQL for the database."
+            ),
+            "jobDescription": "Looking for Full Stack Developer with Java and React experience",
+        }
+        t0 = time.time()
+        r  = requests.post(f"{BASE_URL}/rewrite", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        elapsed = time.time() - t0
+        source  = result.get("source", "unknown")
+        _ok(f"Done in {elapsed:.1f}s  [source={source}]")
+        print(f"     optimized_resume (first 300 chars): {result.get('optimized_resume','')[:300]}")
+        print(f"     improvements: {result.get('improvements', [])}")
+        # Validate that the output is a proper resume, not GPT-2 garbage
+        optimized = result.get("optimized_resume", "")
+        if len(optimized) < 100:
+            _fail("Rewrite output too short (likely GPT-2 garbage)", f"len={len(optimized)}")
+            return False
+        return True
+    except Exception as e:
+        _fail("Rewrite failed", e)
+        return False
+
+
+def test_project_enhance() -> bool:
+    print("\n3. Project Enhancement  POST /project-enhance")
+    try:
+        data = {
+            "projects": [
+                "Built a website using React",
+                "Created REST API with Spring Boot",
+            ]
+        }
+        t0 = time.time()
+        r  = requests.post(f"{BASE_URL}/project-enhance", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        elapsed = time.time() - t0
+        count   = result.get("total_enhanced", 0)
+        _ok(f"Enhanced {count} projects in {elapsed:.1f}s")
+        for i, p in enumerate(result.get("enhanced_projects", [])[:3], 1):
+            print(f"     Project {i}: {p[:200]}")
+        # Validate output quality
+        enhanced = result.get("enhanced_projects", [])
+        if not enhanced:
+            _fail("No enhanced projects returned", "empty list")
+            return False
+        if any(len(p) < 20 for p in enhanced):
+            _fail("Some enhanced projects too short", enhanced)
+            return False
+        return True
+    except Exception as e:
+        _fail("Project enhance failed", e)
+        return False
+
+
+def test_jd_tailor() -> bool:
+    print("\n4. JD Tailoring  POST /jd-tailor")
+    try:
+        data = {
+            "resumeText": (
+                "Java Developer with Spring Boot experience. Built REST APIs and microservices."
+            ),
+            "jobDescription": (
+                "Seeking Java Developer with Spring Boot, Microservices, and AWS experience"
+            ),
+        }
+        t0 = time.time()
+        r  = requests.post(f"{BASE_URL}/jd-tailor", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        elapsed = time.time() - t0
+        _ok(f"Done in {elapsed:.1f}s")
+        print(f"     jd_match_score:   {result.get('jd_match_score', 0):.1f}%")
+        print(f"     key_requirements: {', '.join(result.get('key_requirements', [])[:5])}")
+        print(f"     suggestions:      {result.get('suggestions', [])[:2]}")
+        return True
+    except Exception as e:
+        _fail("JD tailor failed", e)
+        return False
+
+
+def test_suggest_skills() -> bool:
+    print("\n5. Suggest Skills  POST /suggest-skills")
+    try:
+        data = {
+            "resumeText": (
+                "Java Developer with 2 years of experience. "
+                "Skills: Java, Spring Boot, MySQL, Git. "
+                "Built REST APIs and microservices."
+            )
+        }
+        t0 = time.time()
+        r  = requests.post(f"{BASE_URL}/suggest-skills", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        elapsed = time.time() - t0
+        _ok(f"Done in {elapsed:.1f}s")
+        print(f"     missing_technical:  {result.get('missing_technical', [])[:4]}")
+        print(f"     trending:           {result.get('trending', [])[:4]}")
+        print(f"     soft_skills:        {result.get('soft_skills', [])[:3]}")
+        print(f"     certifications:     {result.get('certifications', [])[:2]}")
+        print(f"     role_gap_analysis:  {str(result.get('role_gap_analysis',''))[:150]}")
+        # Validate required keys
+        for key in ["missing_technical", "trending", "soft_skills", "certifications", "role_gap_analysis"]:
+            if key not in result:
+                _fail(f"Missing key in response: {key}", result)
+                return False
+        return True
+    except Exception as e:
+        _fail("Suggest skills failed", e)
+        return False
+
+
+def test_project_summary() -> bool:
+    print("\n6. Project Summary  POST /project-summary")
+    try:
+        data = {
+            "title":     "E-Commerce Platform",
+            "techStack": "React, Spring Boot, MySQL, Docker, AWS",
+        }
+        t0 = time.time()
+        r  = requests.post(f"{BASE_URL}/project-summary", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        elapsed = time.time() - t0
+        _ok(f"Done in {elapsed:.1f}s")
+        print(f"     one_liner:      {result.get('one_liner','')[:200]}")
+        print(f"     full_summary:   {result.get('full_summary','')[:200]}")
+        print(f"     highlights:     {result.get('highlights', [])[:2]}")
+        print(f"     impact_metrics: {result.get('impact_metrics', [])[:2]}")
+        # Validate required keys
+        for key in ["one_liner", "full_summary", "highlights", "impact_metrics"]:
+            if key not in result:
+                _fail(f"Missing key in response: {key}", result)
+                return False
+        return True
+    except Exception as e:
+        _fail("Project summary failed", e)
+        return False
+
+
+def test_jd_suggestions() -> bool:
+    print("\n7. JD Suggestions  POST /jd-suggestions")
+    try:
+        data = {
+            "resumeText": (
+                "Java Developer with Spring Boot experience. Built REST APIs."
+            ),
+            "jobDescription": (
+                "Seeking Java Developer with Spring Boot, Microservices, Docker, "
+                "Kubernetes, and AWS experience. Knowledge of React is a plus."
+            ),
+        }
+        t0 = time.time()
+        r  = requests.post(f"{BASE_URL}/jd-suggestions", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        elapsed = time.time() - t0
+        _ok(f"Done in {elapsed:.1f}s")
+        print(f"     skills_to_add:       {result.get('skills_to_add', [])[:4]}")
+        print(f"     keywords_to_include: {result.get('keywords_to_include', [])[:4]}")
+        print(f"     action_plan:         {result.get('action_plan', [])[:2]}")
+        projects = result.get("projects_to_add", [])
+        if projects:
+            print(f"     projects_to_add[0]:  {projects[0].get('title', '')}")
+        # Validate required keys
+        for key in ["skills_to_add", "projects_to_add", "keywords_to_include", "action_plan"]:
+            if key not in result:
+                _fail(f"Missing key in response: {key}", result)
+                return False
+        return True
+    except Exception as e:
+        _fail("JD suggestions failed", e)
+        return False
+
+
+def test_hr_rank() -> bool:
+    print("\n8. HR Ranking  POST /hr/rank")
+    try:
+        data = {
+            "candidates": [
+                {"email": "alice@test.com",   "atsScore": 85, "experienceYears": 3},
+                {"email": "bob@test.com",     "atsScore": 72, "experienceYears": 2},
+                {"email": "charlie@test.com", "atsScore": 90, "experienceYears": 5},
+                {"email": "diana@test.com",   "atsScore": 65, "experienceYears": 1},
+            ]
+        }
+        r = requests.post(f"{BASE_URL}/hr/rank", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result = r.json()
+        ranked = result.get("ranked_candidates", [])
+        _ok(f"Ranked {len(ranked)} candidates")
+        for c in ranked[:3]:
+            print(f"     #{c.get('rank')}  {c.get('email')}  score={c.get('rank_score'):.1f}  status={c.get('status')}")
+        return True
+    except Exception as e:
+        _fail("HR rank failed", e)
+        return False
+
+
+def test_hr_auto_shortlist() -> bool:
+    print("\n9. HR Auto-Shortlist  POST /hr/auto-shortlist")
+    try:
+        data = {
+            "candidates": [
+                {"email": "a@test.com", "atsScore": 85},
+                {"email": "b@test.com", "atsScore": 65},
+                {"email": "c@test.com", "atsScore": 90},
+                {"email": "d@test.com", "atsScore": 55},
+            ],
+            "threshold": 70,
+        }
+        r = requests.post(f"{BASE_URL}/hr/auto-shortlist", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result  = r.json()
+        summary = result.get("summary", {})
+        _ok("Done")
+        print(f"     total={summary.get('total')}  shortlisted={summary.get('shortlisted_count')}  "
+              f"pending={summary.get('pending_count')}  rejected={summary.get('rejected_count')}")
+        return True
+    except Exception as e:
+        _fail("HR auto-shortlist failed", e)
+        return False
+
+
+def test_hr_cluster() -> bool:
+    print("\n10. HR Clustering  POST /hr/cluster")
+    try:
+        data = {
+            "candidates": [
+                {"email": "a@test.com", "atsScore": 85, "experienceYears": 3},
+                {"email": "b@test.com", "atsScore": 72, "experienceYears": 2},
+                {"email": "c@test.com", "atsScore": 90, "experienceYears": 5},
+                {"email": "d@test.com", "atsScore": 55, "experienceYears": 1},
+                {"email": "e@test.com", "atsScore": 78, "experienceYears": 4},
+                {"email": "f@test.com", "atsScore": 60, "experienceYears": 1},
+            ],
+            "n_clusters": 3,
+        }
+        r = requests.post(f"{BASE_URL}/hr/cluster", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result = r.json()
+        _ok(f"{result.get('total_clusters')} clusters created")
+        for s in result.get("cluster_summary", []):
+            print(f"     {s['cluster_name']}: {s['size']} members, avg ATS={s['avg_ats_score']:.1f}")
+        return True
+    except Exception as e:
+        _fail("HR cluster failed", e)
+        return False
+
+
+def test_hr_insights() -> bool:
+    print("\n11. HR Insights  POST /hr/insights")
+    try:
+        data = {
+            "candidates": [
+                {"email": "a@test.com", "atsScore": 85, "skills": ["Python", "React"],        "recommendedRole": "Full Stack Developer"},
+                {"email": "b@test.com", "atsScore": 72, "skills": ["Java", "Spring Boot"],    "recommendedRole": "Java Developer"},
+                {"email": "c@test.com", "atsScore": 90, "skills": ["Python", "ML", "TensorFlow"], "recommendedRole": "Data Scientist"},
+            ]
+        }
+        r = requests.post(f"{BASE_URL}/hr/insights", json=data, timeout=TIMEOUT)
+        r.raise_for_status()
+        result = r.json()
+        _ok("Done")
+        print(f"     total_candidates:  {result.get('total_candidates')}")
+        print(f"     average_ats_score: {result.get('average_ats_score')}")
+        print(f"     top_skills:        {result.get('top_skills', [])[:3]}")
+        print(f"     recommendations:   {result.get('recommendations', [])[:2]}")
+        return True
+    except Exception as e:
+        _fail("HR insights failed", e)
+        return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Runner
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main():
+    print("=" * 65)
+    print("  AI Resume Screening System — API Test Suite")
+    print("=" * 65)
+    print(f"  Base URL : {BASE_URL}")
+    print(f"  Timeout  : {TIMEOUT}s per request")
+    print("=" * 65)
+
+    tests = [
+        test_health_check,
+        test_rewrite,
+        test_project_enhance,
+        test_jd_tailor,
+        test_suggest_skills,
+        test_project_summary,
+        test_jd_suggestions,
+        test_hr_rank,
+        test_hr_auto_shortlist,
+        test_hr_cluster,
+        test_hr_insights,
+    ]
+
+    passed = 0
+    start  = time.time()
+
+    for test in tests:
+        if test():
+            passed += 1
+
+    elapsed = time.time() - start
+    print("\n" + "=" * 65)
+    print(f"  Results : {passed}/{len(tests)} tests passed  ({elapsed:.1f}s total)")
+    print("=" * 65)
+
+    if passed == len(tests):
+        print("\n✅  All tests passed — your API is fully operational.")
+    else:
+        failed = len(tests) - passed
+        print(f"\n⚠️   {failed} test(s) failed. Check errors above.")
+        print("     Is the AI service running?  →  python main.py")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,34 @@
+# ─── Web Framework ────────────────────────────────────────────────────────────
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6       # required for UploadFile / File(...)
+python-dotenv==1.0.0
+pydantic==2.5.0
+
+# ─── Document Extraction ──────────────────────────────────────────────────────
+PyPDF2==3.0.1
+python-docx==1.1.0
+
+# ─── NLP ──────────────────────────────────────────────────────────────────────
+spacy==3.7.2
+# After install run: python -m spacy download en_core_web_sm
+nltk==3.8.1
+
+# ─── AI / ML ──────────────────────────────────────────────────────────────────
+sentence-transformers==2.2.2  # semantic similarity for JD matching
+scikit-learn==1.3.2           # KMeans clustering
+pandas==2.1.3
+numpy==1.26.2
+
+# ─── LLM (optional — local fallback works without these) ──────────────────────
+# transformers and torch are large; keep if you want GPT-2 local inference
+transformers==4.35.2
+torch==2.1.1
+
+# ─── Optional API-based LLMs ──────────────────────────────────────────────────
+openai==1.3.5                 # only used if OPENAI_API_KEY is set
+requests==2.31.0              # only used if MISTRAL_API_KEY is set
+
+# NOTE: language-tool-python removed — it requires a running Java JRE and
+# causes startup failures in most environments. Grammar fixing is now done
+# with a lightweight pure-Python rule-based approach instead.

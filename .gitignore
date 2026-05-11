@@ -1,0 +1,26 @@
+notepad .gitignore
+```
+
+Click **Yes** when Notepad asks to create a new file.
+
+Paste this inside:
+```
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.env
+
+# Backend
+backend/target/
+backend/.env
+backend/*.jar
+
+# AI Service
+ai_service/__pycache__/
+ai_service/venv/
+ai_service/.env
+ai_service/*.pyc
+
+# General
+.DS_Store
+*.log

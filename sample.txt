@@ -1,0 +1,681 @@
+import { useState, useEffect, useRef } from "react";
+
+// ── Mock data (replace with your real API response) ──────────────────────────
+const MOCK_DATA = {
+  missing_technical: ["Docker", "Kubernetes", "CI/CD Pipelines", "Redis", "System Design", "GraphQL", "Terraform"],
+  trending: ["LLM Fine-Tuning", "RAG", "LangChain", "Vector Databases", "Kubernetes", "Terraform", "GraphQL"],
+  soft_skills: ["Cross-functional Collaboration", "Technical Communication", "Agile / Scrum", "Problem Decomposition", "Code Review", "Mentorship"],
+  certifications: [
+    { name: "AWS Certified Developer", provider: "Amazon Web Services", level: "Intermediate" },
+    { name: "Certified Scrum Master", provider: "Scrum Alliance", level: "Beginner" },
+    { name: "Google Cloud Professional", provider: "Google Cloud", level: "Advanced" },
+    { name: "Certified Kubernetes Admin", provider: "CNCF", level: "Advanced" },
+  ],
+  role_gap_analysis: "The current skill gap in the software engineering market is the lack of expertise in emerging technologies such as AI, cloud computing, and cybersecurity. To bridge this gap, software engineers should focus on acquiring skills in these areas. By doing so, they can enhance their career prospects and stay competitive in the industry.",
+};
+
+const LEVEL_CONFIG = {
+  Beginner:     { color: "#22d3ee", bg: "rgba(34,211,238,0.12)", bar: 33 },
+  Intermediate: { color: "#f59e0b", bg: "rgba(245,158,11,0.12)", bar: 66 },
+  Advanced:     { color: "#a78bfa", bg: "rgba(167,139,250,0.12)", bar: 100 },
+};
+
+const CERT_ICONS = {
+  "Amazon Web Services": "☁️", "Google Cloud": "🌐", "CNCF": "⚙️",
+  "Scrum Alliance": "🔄", "HashiCorp": "🏗️", "Oracle": "🗄️",
+  "Microsoft": "🪟", default: "🎓",
+};
+
+// ── Skill pill with animated entry ───────────────────────────────────────────
+function SkillPill({ skill, index, color, onAdd, added }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={() => onAdd(skill)}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "6px 14px", borderRadius: 999, cursor: "pointer",
+        border: `1.5px solid ${added ? color : hovered ? color : "rgba(255,255,255,0.12)"}`,
+        background: added ? `${color}22` : hovered ? `${color}15` : "rgba(255,255,255,0.04)",
+        color: added ? color : hovered ? color : "#cbd5e1",
+        fontSize: 13, fontWeight: 500, letterSpacing: 0.2,
+        transition: "all 0.2s ease",
+        animation: `fadeSlideIn 0.4s ease ${index * 0.06}s both`,
+        userSelect: "none",
+      }}
+    >
+      {added && <span style={{ fontSize: 10 }}>✓</span>}
+      {skill}
+    </div>
+  );
+}
+
+// ── Section header ────────────────────────────────────────────────────────────
+function SectionHeader({ icon, label, count, accentColor, action }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{
+          width: 32, height: 32, borderRadius: 8,
+          background: `${accentColor}20`, border: `1px solid ${accentColor}40`,
+          display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15,
+        }}>{icon}</div>
+        <div>
+          <div style={{ color: "#f1f5f9", fontSize: 13, fontWeight: 700, letterSpacing: 0.8, textTransform: "uppercase" }}>{label}</div>
+          {count !== undefined && <div style={{ color: "#64748b", fontSize: 11, marginTop: 1 }}>{count} skills</div>}
+        </div>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+// ── Copy button ───────────────────────────────────────────────────────────────
+function CopyBtn({ text, small }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  };
+  return (
+    <button onClick={copy} style={{
+      padding: small ? "4px 10px" : "6px 14px",
+      borderRadius: 7, border: "1px solid rgba(255,255,255,0.1)",
+      background: copied ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
+      color: copied ? "#4ade80" : "#94a3b8", fontSize: 12, fontWeight: 500,
+      cursor: "pointer", transition: "all 0.2s", display: "flex", alignItems: "center", gap: 5,
+      whiteSpace: "nowrap",
+    }}>
+      {copied ? "✓ Copied" : small ? "Copy" : "📋 Copy All"}
+    </button>
+  );
+}
+
+// ── Progress ring for gap score ───────────────────────────────────────────────
+function RingScore({ score, label, color }) {
+  const r = 36, circ = 2 * Math.PI * r;
+  const dash = (score / 100) * circ;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+      <svg width={90} height={90} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={45} cy={45} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={7} />
+        <circle cx={45} cy={45} r={r} fill="none" stroke={color} strokeWidth={7}
+          strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
+          style={{ transition: "stroke-dasharray 1.2s cubic-bezier(.4,0,.2,1)" }} />
+        <text x={45} y={50} textAnchor="middle" fill={color}
+          style={{ fontSize: 18, fontWeight: 800, transform: "rotate(90deg)", transformOrigin: "45px 45px" }}>
+          {score}%
+        </text>
+      </svg>
+      <div style={{ color: "#94a3b8", fontSize: 11, textAlign: "center" }}>{label}</div>
+    </div>
+  );
+}
+
+// ── Radar / heatmap for skill coverage ───────────────────────────────────────
+function SkillHeatmap({ data }) {
+  const categories = [
+    { label: "Technical", score: Math.min(100, data.missing_technical.length * 8 + 30), color: "#38bdf8" },
+    { label: "Trending",  score: Math.min(100, data.trending.length * 10 + 20),         color: "#a78bfa" },
+    { label: "Soft",      score: Math.min(100, data.soft_skills.length * 12 + 20),      color: "#34d399" },
+    { label: "Certs",     score: Math.min(100, data.certifications.length * 20 + 10),   color: "#f59e0b" },
+  ];
+  return (
+    <div style={{ display: "flex", gap: 10, justifyContent: "space-around" }}>
+      {categories.map(c => (
+        <div key={c.label} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          <div style={{ position: "relative", width: 44, height: 80 }}>
+            <div style={{
+              position: "absolute", bottom: 0, left: 0, right: 0,
+              height: `${c.score}%`, borderRadius: "4px 4px 0 0",
+              background: `linear-gradient(to top, ${c.color}, ${c.color}66)`,
+              transition: "height 1s cubic-bezier(.4,0,.2,1)",
+              boxShadow: `0 0 12px ${c.color}44`,
+            }} />
+            <div style={{
+              position: "absolute", bottom: 0, left: 0, right: 0, height: "100%",
+              borderRadius: 4, border: `1px solid ${c.color}30`,
+              background: `${c.color}08`,
+            }} />
+          </div>
+          <div style={{ color: "#94a3b8", fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 }}>{c.label}</div>
+          <div style={{ color: c.color, fontSize: 12, fontWeight: 700 }}>{c.score}%</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+export default function SkillSuggestions({ apiData = MOCK_DATA }) {
+  const data = apiData || MOCK_DATA;
+  const [addedSkills, setAddedSkills] = useState(new Set());
+  const [activeTab, setActiveTab] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [expandedCert, setExpandedCert] = useState(null);
+  const [showExport, setShowExport] = useState(false);
+  const [savedSets, setSavedSets] = useState([]);
+  const [saveLabel, setSaveLabel] = useState("");
+  const [showSaveInput, setShowSaveInput] = useState(false);
+
+  const allSkills = [...(data.missing_technical || []), ...(data.trending || []), ...(data.soft_skills || [])];
+
+  const filteredByTab = {
+    all:       allSkills,
+    technical: data.missing_technical || [],
+    trending:  data.trending || [],
+    soft:      data.soft_skills || [],
+    certs:     [],
+  }[activeTab] || allSkills;
+
+  const filtered = searchQuery
+    ? filteredByTab.filter(s => s.toLowerCase().includes(searchQuery.toLowerCase()))
+    : filteredByTab;
+
+  const handleAdd = (skill) => {
+    setAddedSkills(prev => {
+      const next = new Set(prev);
+      next.has(skill) ? next.delete(skill) : next.add(skill);
+      return next;
+    });
+  };
+
+  const handleAddAll = (skills) => {
+    setAddedSkills(prev => {
+      const next = new Set(prev);
+      skills.forEach(s => next.add(s));
+      return next;
+    });
+  };
+
+  const exportToClipboard = () => {
+    const txt = [...addedSkills].join(", ");
+    navigator.clipboard.writeText(txt);
+    setShowExport(true);
+    setTimeout(() => setShowExport(false), 2000);
+  };
+
+  const saveSkillSet = () => {
+    if (!saveLabel.trim()) return;
+    setSavedSets(prev => [...prev, { label: saveLabel, skills: [...addedSkills], date: new Date().toLocaleDateString() }]);
+    setShowSaveInput(false);
+    setSaveLabel("");
+  };
+
+  const gapScore = Math.max(10, 100 - Math.round((addedSkills.size / Math.max(allSkills.length, 1)) * 80));
+  const readinessScore = Math.min(95, 20 + Math.round((addedSkills.size / Math.max(allSkills.length, 1)) * 75));
+
+  const TABS = [
+    { id: "all",       label: "All Skills",  count: allSkills.length },
+    { id: "technical", label: "Technical",   count: (data.missing_technical || []).length },
+    { id: "trending",  label: "Trending",    count: (data.trending || []).length },
+    { id: "soft",      label: "Soft Skills", count: (data.soft_skills || []).length },
+    { id: "certs",     label: "Certs",       count: (data.certifications || []).length },
+  ];
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#0a0f1e",
+      fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
+      padding: "24px 16px",
+      color: "#e2e8f0",
+    }}>
+      <style>{`
+        @keyframes fadeSlideIn {
+          from { opacity:0; transform:translateY(8px); }
+          to   { opacity:1; transform:translateY(0);   }
+        }
+        @keyframes pulse {
+          0%,100% { opacity:1; } 50% { opacity:0.5; }
+        }
+        @keyframes shimmer {
+          0%   { background-position: -200% center; }
+          100% { background-position:  200% center; }
+        }
+        ::-webkit-scrollbar { width:4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius:4px; }
+      `}</style>
+
+      <div style={{ maxWidth: 860, margin: "0 auto" }}>
+
+        {/* ── Header ─────────────────────────────────────────────────────── */}
+        <div style={{
+          marginBottom: 28, display: "flex", alignItems: "flex-start",
+          justifyContent: "space-between", flexWrap: "wrap", gap: 16,
+        }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <div style={{
+                width: 36, height: 36, borderRadius: 10,
+                background: "linear-gradient(135deg,#6366f1,#8b5cf6)",
+                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18,
+                boxShadow: "0 0 20px #6366f144",
+              }}>⚡</div>
+              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "#f1f5f9", letterSpacing: -0.5 }}>
+                AI Skill Intelligence
+              </h1>
+              <div style={{
+                padding: "2px 8px", borderRadius: 999,
+                background: "rgba(99,102,241,0.2)", border: "1px solid rgba(99,102,241,0.4)",
+                color: "#a5b4fc", fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
+              }}>LIVE</div>
+            </div>
+            <p style={{ margin: 0, color: "#64748b", fontSize: 13 }}>
+              Personalised skill gap analysis powered by Groq LLM
+            </p>
+          </div>
+
+          {/* Readiness score pill */}
+          <div style={{
+            padding: "10px 18px", borderRadius: 12,
+            background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+            display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <div>
+              <div style={{ color: "#64748b", fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8 }}>Readiness</div>
+              <div style={{ color: "#4ade80", fontSize: 22, fontWeight: 800 }}>{readinessScore}%</div>
+            </div>
+            <div style={{ width: 1, height: 36, background: "rgba(255,255,255,0.08)" }} />
+            <div>
+              <div style={{ color: "#64748b", fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8 }}>Added</div>
+              <div style={{ color: "#f1f5f9", fontSize: 22, fontWeight: 800 }}>{addedSkills.size}<span style={{ color: "#64748b", fontSize: 13 }}>/{allSkills.length}</span></div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Stats row ──────────────────────────────────────────────────── */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 24 }}>
+          {[
+            { label: "Missing Tech",   value: (data.missing_technical || []).length, color: "#38bdf8", icon: "🔧" },
+            { label: "Trending 2025",  value: (data.trending || []).length,          color: "#a78bfa", icon: "📈" },
+            { label: "Soft Skills",    value: (data.soft_skills || []).length,        color: "#34d399", icon: "🤝" },
+            { label: "Certifications", value: (data.certifications || []).length,    color: "#f59e0b", icon: "🏆" },
+          ].map((s, i) => (
+            <div key={i} style={{
+              padding: "14px 16px", borderRadius: 12,
+              background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+              animation: `fadeSlideIn 0.5s ease ${i * 0.08}s both`,
+            }}>
+              <div style={{ fontSize: 18, marginBottom: 6 }}>{s.icon}</div>
+              <div style={{ color: s.color, fontSize: 24, fontWeight: 800, lineHeight: 1 }}>{s.value}</div>
+              <div style={{ color: "#475569", fontSize: 11, marginTop: 4, fontWeight: 500 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* ── Search + Tabs ───────────────────────────────────────────────── */}
+        <div style={{
+          padding: "16px 20px", borderRadius: 14,
+          background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+          marginBottom: 18,
+        }}>
+          {/* Search bar */}
+          <div style={{ position: "relative", marginBottom: 14 }}>
+            <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#475569", fontSize: 14 }}>🔍</span>
+            <input
+              type="text"
+              placeholder="Search skills..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{
+                width: "100%", padding: "9px 12px 9px 36px", borderRadius: 9,
+                background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+                color: "#f1f5f9", fontSize: 13, outline: "none", boxSizing: "border-box",
+              }}
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery("")} style={{
+                position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 14,
+              }}>✕</button>
+            )}
+          </div>
+
+          {/* Tabs */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {TABS.map(tab => (
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{
+                padding: "6px 14px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 600,
+                border: activeTab === tab.id ? "1px solid #6366f1" : "1px solid rgba(255,255,255,0.08)",
+                background: activeTab === tab.id ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.03)",
+                color: activeTab === tab.id ? "#a5b4fc" : "#64748b",
+                transition: "all 0.2s",
+              }}>
+                {tab.label} <span style={{ opacity: 0.6 }}>({tab.count})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Skills grid (filtered view) ─────────────────────────────────── */}
+        {activeTab !== "certs" && (
+          <div style={{
+            padding: "20px", borderRadius: 14,
+            background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+            marginBottom: 18, animation: "fadeSlideIn 0.4s ease both",
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ color: "#f1f5f9", fontSize: 14, fontWeight: 700 }}>
+                {searchQuery ? `Results for "${searchQuery}"` : TABS.find(t => t.id === activeTab)?.label}
+                <span style={{ color: "#475569", fontSize: 12, fontWeight: 400, marginLeft: 8 }}>{filtered.length} skills</span>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => handleAddAll(filtered)} style={{
+                  padding: "5px 12px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.4)",
+                  background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                }}>+ Add All</button>
+                <CopyBtn text={filtered.join(", ")} small />
+              </div>
+            </div>
+            {filtered.length === 0 ? (
+              <div style={{ color: "#475569", fontSize: 13, textAlign: "center", padding: "20px 0" }}>
+                No skills match "{searchQuery}"
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {filtered.map((skill, i) => {
+                  const isTrending = (data.trending || []).includes(skill);
+                  const color = isTrending ? "#a78bfa" : (data.soft_skills || []).includes(skill) ? "#34d399" : "#38bdf8";
+                  return (
+                    <SkillPill key={skill} skill={skill} index={i} color={color}
+                      onAdd={handleAdd} added={addedSkills.has(skill)} />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Three column sections when on "all" ────────────────────────── */}
+        {activeTab === "all" && !searchQuery && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 18 }}>
+            {/* Missing Technical */}
+            <div style={{
+              padding: 18, borderRadius: 14,
+              background: "rgba(56,189,248,0.04)", border: "1px solid rgba(56,189,248,0.15)",
+            }}>
+              <SectionHeader icon="🔧" label="Missing Technical" accentColor="#38bdf8"
+                count={(data.missing_technical || []).length}
+                action={<CopyBtn text={(data.missing_technical || []).join(", ")} small />}
+              />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {(data.missing_technical || []).map((s, i) => (
+                  <SkillPill key={s} skill={s} index={i} color="#38bdf8" onAdd={handleAdd} added={addedSkills.has(s)} />
+                ))}
+              </div>
+            </div>
+
+            {/* Trending */}
+            <div style={{
+              padding: 18, borderRadius: 14,
+              background: "rgba(167,139,250,0.04)", border: "1px solid rgba(167,139,250,0.15)",
+            }}>
+              <SectionHeader icon="📈" label="Trending in 2025" accentColor="#a78bfa"
+                count={(data.trending || []).length}
+                action={<CopyBtn text={(data.trending || []).join(", ")} small />}
+              />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {(data.trending || []).map((s, i) => (
+                  <SkillPill key={s} skill={s} index={i} color="#a78bfa" onAdd={handleAdd} added={addedSkills.has(s)} />
+                ))}
+              </div>
+            </div>
+
+            {/* Soft Skills */}
+            <div style={{
+              padding: 18, borderRadius: 14,
+              background: "rgba(52,211,153,0.04)", border: "1px solid rgba(52,211,153,0.15)",
+            }}>
+              <SectionHeader icon="🤝" label="Soft Skills" accentColor="#34d399"
+                count={(data.soft_skills || []).length}
+                action={<CopyBtn text={(data.soft_skills || []).join(", ")} small />}
+              />
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {(data.soft_skills || []).map((s, i) => (
+                  <SkillPill key={s} skill={s} index={i} color="#34d399" onAdd={handleAdd} added={addedSkills.has(s)} />
+                ))}
+              </div>
+            </div>
+
+            {/* Skill Coverage Chart */}
+            <div style={{
+              padding: 18, borderRadius: 14,
+              background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+            }}>
+              <SectionHeader icon="📊" label="Skill Coverage" accentColor="#6366f1" />
+              <SkillHeatmap data={data} />
+              <div style={{ marginTop: 14, padding: "10px 14px", borderRadius: 9, background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)" }}>
+                <div style={{ color: "#a5b4fc", fontSize: 11, fontWeight: 700, marginBottom: 4 }}>PROGRESS</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, height: 6, borderRadius: 99, background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 99,
+                      width: `${readinessScore}%`,
+                      background: "linear-gradient(90deg,#6366f1,#8b5cf6,#a78bfa)",
+                      transition: "width 0.8s ease",
+                    }} />
+                  </div>
+                  <span style={{ color: "#a5b4fc", fontSize: 12, fontWeight: 700, minWidth: 36 }}>{readinessScore}%</span>
+                </div>
+                <div style={{ color: "#64748b", fontSize: 11, marginTop: 6 }}>{addedSkills.size} of {allSkills.length} skills added to profile</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Certifications ──────────────────────────────────────────────── */}
+        {(activeTab === "all" || activeTab === "certs") && (
+          <div style={{
+            padding: 20, borderRadius: 14,
+            background: "rgba(245,158,11,0.04)", border: "1px solid rgba(245,158,11,0.15)",
+            marginBottom: 18, animation: "fadeSlideIn 0.5s ease 0.2s both",
+          }}>
+            <SectionHeader icon="🏆" label="Recommended Certifications" accentColor="#f59e0b"
+              count={(data.certifications || []).length}
+            />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px,1fr))", gap: 10 }}>
+              {(data.certifications || []).map((cert, i) => {
+                const cfg = LEVEL_CONFIG[cert.level] || LEVEL_CONFIG.Intermediate;
+                const icon = CERT_ICONS[cert.provider] || CERT_ICONS.default;
+                const isExp = expandedCert === i;
+                return (
+                  <div key={i} onClick={() => setExpandedCert(isExp ? null : i)}
+                    style={{
+                      padding: 14, borderRadius: 11, cursor: "pointer",
+                      background: isExp ? `${cfg.color}12` : "rgba(255,255,255,0.04)",
+                      border: `1px solid ${isExp ? cfg.color + "50" : "rgba(255,255,255,0.08)"}`,
+                      transition: "all 0.25s ease",
+                      animation: `fadeSlideIn 0.4s ease ${i * 0.07}s both`,
+                    }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      <div style={{
+                        width: 36, height: 36, borderRadius: 9, flexShrink: 0,
+                        background: cfg.bg, border: `1px solid ${cfg.color}40`,
+                        display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18,
+                      }}>{icon}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: "#f1f5f9", fontSize: 13, fontWeight: 700, lineHeight: 1.3, marginBottom: 4 }}>{cert.name}</div>
+                        <div style={{ color: "#64748b", fontSize: 11, marginBottom: 8 }}>{cert.provider}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{
+                            padding: "2px 8px", borderRadius: 99, fontSize: 10, fontWeight: 700,
+                            background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.color}40`,
+                          }}>{cert.level}</div>
+                          {/* level bar */}
+                          <div style={{ flex: 1, height: 3, borderRadius: 99, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: `${cfg.bar}%`, background: cfg.color, borderRadius: 99, transition: "width 0.8s ease" }} />
+                          </div>
+                        </div>
+                      </div>
+                      <CopyBtn text={cert.name} small />
+                    </div>
+                    {isExp && (
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${cfg.color}20` }}>
+                        <div style={{ color: "#94a3b8", fontSize: 12, lineHeight: 1.6 }}>
+                          Earning the <strong style={{ color: cfg.color }}>{cert.name}</strong> certification from {cert.provider} demonstrates
+                          {cert.level === "Advanced" ? " expert-level" : cert.level === "Intermediate" ? " solid professional" : " foundational"} expertise.
+                          This credential is highly valued by recruiters and can significantly boost your ATS score.
+                        </div>
+                        <a href={`https://www.google.com/search?q=${encodeURIComponent(cert.name + " certification")}`}
+                          target="_blank" rel="noreferrer"
+                          onClick={e => e.stopPropagation()}
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: 5, marginTop: 10,
+                            padding: "5px 12px", borderRadius: 7, textDecoration: "none",
+                            background: cfg.bg, border: `1px solid ${cfg.color}40`, color: cfg.color, fontSize: 11, fontWeight: 600,
+                          }}>
+                          Learn more ↗
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── Role Gap Analysis ───────────────────────────────────────────── */}
+        {(activeTab === "all") && (
+          <div style={{
+            padding: 20, borderRadius: 14, marginBottom: 18,
+            background: "linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.05))",
+            border: "1px solid rgba(99,102,241,0.2)",
+            animation: "fadeSlideIn 0.5s ease 0.3s both",
+          }}>
+            <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <span style={{ fontSize: 18 }}>🧠</span>
+                  <span style={{ color: "#a5b4fc", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8 }}>Role Gap Analysis</span>
+                </div>
+                <p style={{ margin: 0, color: "#94a3b8", fontSize: 13, lineHeight: 1.7 }}>
+                  {data.role_gap_analysis}
+                </p>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}>
+                <RingScore score={gapScore} label="Gap Score" color="#f87171" />
+                <RingScore score={readinessScore} label="Ready" color="#4ade80" />
+              </div>
+            </div>
+            <CopyBtn text={data.role_gap_analysis} />
+          </div>
+        )}
+
+        {/* ── My Skill Basket ─────────────────────────────────────────────── */}
+        <div style={{
+          padding: 20, borderRadius: 14,
+          background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+          marginBottom: 18,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 16 }}>🧺</span>
+              <span style={{ color: "#f1f5f9", fontSize: 14, fontWeight: 700 }}>My Skill Basket</span>
+              <span style={{
+                padding: "2px 8px", borderRadius: 99, background: "rgba(99,102,241,0.2)",
+                color: "#a5b4fc", fontSize: 11, fontWeight: 700,
+              }}>{addedSkills.size}</span>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {addedSkills.size > 0 && <>
+                <button onClick={() => setShowSaveInput(s => !s)} style={{
+                  padding: "6px 12px", borderRadius: 7, border: "1px solid rgba(52,211,153,0.4)",
+                  background: "rgba(52,211,153,0.1)", color: "#34d399", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                }}>💾 Save Set</button>
+                <button onClick={exportToClipboard} style={{
+                  padding: "6px 12px", borderRadius: 7, border: "1px solid rgba(99,102,241,0.4)",
+                  background: showExport ? "rgba(52,211,153,0.1)" : "rgba(99,102,241,0.1)",
+                  color: showExport ? "#4ade80" : "#a5b4fc", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                  transition: "all 0.2s",
+                }}>{showExport ? "✓ Copied!" : "📤 Export"}</button>
+                <button onClick={() => setAddedSkills(new Set())} style={{
+                  padding: "6px 12px", borderRadius: 7, border: "1px solid rgba(248,113,113,0.3)",
+                  background: "rgba(248,113,113,0.08)", color: "#f87171", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                }}>🗑 Clear</button>
+              </>}
+            </div>
+          </div>
+
+          {showSaveInput && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <input type="text" placeholder="Label this skill set (e.g. Java Backend Role)..." value={saveLabel}
+                onChange={e => setSaveLabel(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveSkillSet()}
+                style={{
+                  flex: 1, padding: "8px 12px", borderRadius: 8, background: "rgba(255,255,255,0.05)",
+                  border: "1px solid rgba(255,255,255,0.12)", color: "#f1f5f9", fontSize: 12, outline: "none",
+                }} />
+              <button onClick={saveSkillSet} style={{
+                padding: "8px 14px", borderRadius: 8, border: "none",
+                background: "rgba(52,211,153,0.2)", color: "#34d399", fontSize: 12, fontWeight: 600, cursor: "pointer",
+              }}>Save</button>
+            </div>
+          )}
+
+          {addedSkills.size === 0 ? (
+            <div style={{
+              textAlign: "center", padding: "24px 0", color: "#334155",
+              border: "1px dashed rgba(255,255,255,0.07)", borderRadius: 10,
+            }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>👆</div>
+              <div style={{ fontSize: 13 }}>Click any skill above to add it to your basket</div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+              {[...addedSkills].map((s, i) => {
+                const color = (data.trending || []).includes(s) ? "#a78bfa" : (data.soft_skills || []).includes(s) ? "#34d399" : "#38bdf8";
+                return (
+                  <SkillPill key={s} skill={s} index={i} color={color} onAdd={handleAdd} added={true} />
+                );
+              })}
+            </div>
+          )}
+
+          {/* Saved sets */}
+          {savedSets.length > 0 && (
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <div style={{ color: "#64748b", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 10 }}>Saved Sets</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {savedSets.map((set, i) => (
+                  <div key={i} style={{
+                    padding: "10px 14px", borderRadius: 9,
+                    background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)",
+                    display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                  }}>
+                    <div>
+                      <div style={{ color: "#f1f5f9", fontSize: 13, fontWeight: 600 }}>{set.label}</div>
+                      <div style={{ color: "#475569", fontSize: 11, marginTop: 2 }}>{set.skills.length} skills · {set.date}</div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => { setAddedSkills(new Set(set.skills)); }} style={{
+                        padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(99,102,241,0.3)",
+                        background: "rgba(99,102,241,0.1)", color: "#a5b4fc", fontSize: 11, cursor: "pointer",
+                      }}>Restore</button>
+                      <CopyBtn text={set.skills.join(", ")} small />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Footer tip ──────────────────────────────────────────────────── */}
+        <div style={{
+          padding: "12px 16px", borderRadius: 10,
+          background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)",
+          display: "flex", alignItems: "center", gap: 10, color: "#64748b", fontSize: 12,
+        }}>
+          <span>💡</span>
+          <span>Click a skill to toggle it. Use <strong style={{ color: "#a5b4fc" }}>Export</strong> to copy all selected skills for your resume's Skills section.</span>
+        </div>
+      </div>
+    </div>
+  );
+}
